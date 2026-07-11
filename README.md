@@ -16,6 +16,54 @@ Infraestrutura compartilhada da FIAP Fase 4 para a plataforma Oficina.
 - Observabilidade New Relic condicional, iniciando desabilitada.
 - Publicacao de outputs nao sensiveis no SSM Parameter Store.
 
+## Ingress compartilhado e ALB interno
+
+Um unico Ingress compartilhado (`deploy/k8s/ingress/`) materializa um unico ALB
+interno `oficina` para os tres microservicos. Fluxo: `API Gateway futuro -> VPC Link
+futuro -> ALB interno -> Ingress -> Services ClusterIP -> Pods`.
+
+- ALB `internal`, `target-type: ip`, Listener HTTP 80, sem endpoint publico e sem
+  autenticacao no ALB (a autenticacao vira no API Gateway).
+- Rotas publicas versionadas em `config/ingress-routes.json`; `/ready`,
+  `/api/internal/*` e `/api/dev/*` nunca sao expostos.
+- Health check dos Target Groups em `/health` (`traffic-port`, `200-399`).
+- `config/resource-contract.yml` inclui os outputs `albArn`, `albListenerArn` e
+  `albDnsName` em `/oficina/infra/alb/*`, publicados no SSM pelo `Ingress Deploy`.
+- CI: `Ingress CI` (PR, sem AWS). Deploy: `Ingress Deploy` (`workflow_dispatch`,
+  somente `main`, `confirmation = DEPLOY`).
+
+Detalhes em `deploy/k8s/ingress/README.md`. A `IngressClass alb` pertence a Platform
+(criada pelo chart do AWS Load Balancer Controller); este repositorio apenas a
+referencia.
+
+O Ingress inclui tres regras de health por header (`x-oficina-health-target`) para
+`cadastro`, `estoque` e `ordens`, consumidas pelo API Gateway (Entrypoint).
+
+## API Gateway (Entrypoint)
+
+A stack `terraform/entrypoint/` cria a entrada publica oficial: `API Gateway HTTP
+API -> Lambda Authorizer -> VPC Link -> ALB interno -> Services`. E o unico ponto
+publico; o ALB continua interno.
+
+- HTTP API v2 `oficina-api`, stage `$default`, endpoint `execute-api` padrao.
+- VPC Link `oficina` em duas subnets privadas com SG dedicado; integracao privada
+  pelo **Listener ARN** do ALB (`HTTP_PROXY`, `VPC_LINK`, payload `1.0`).
+- Login `POST /api/auth/cpf` integra direto com `oficina-auth-cpf:live`
+  (`AWS_PROXY`, payload `2.0`).
+- Authorizer REQUEST `oficina-authorizer:live` (payload `2.0`, simple responses,
+  cache TTL `0`) nas rotas protegidas.
+- Headers de identidade `x-oficina-user-*` sobrescritos pelo contexto do Authorizer;
+  removidos nas rotas publicas/health.
+- Health por header interno; `/ready`, `/api/internal/*` e `/api/dev/*` nunca sao
+  expostos; sem `$default` route e sem catch-all.
+- Backend Terraform independente `oficina/entrypoint/terraform.tfstate`; sem
+  `terraform_remote_state` (comunicacao por SSM). Outputs em `/oficina/infra/api/*`.
+- CI: `Entrypoint CI` (PR, sem AWS). Deploy: `Entrypoint Deploy`
+  (`workflow_dispatch`, somente `main`, `confirmation = APPLY`).
+
+Contrato versionado em `config/entrypoint.json`. Detalhes em
+`terraform/entrypoint/README.md`.
+
 ## Dependencias
 
 A plataforma depende de uma Infra DB ja provisionada, com backend Terraform remoto existente, parametros SSM publicados em `/oficina/infra/...` e secrets SQL existentes no Secrets Manager. Esta stack nao cria VPC, subnets, RDS, usuarios SQL nem bootstrap de banco.
@@ -42,6 +90,11 @@ Variables futuras do repositorio:
 - `TF_STATE_BUCKET`
 - `TF_STATE_REGION`
 - `TF_STATE_KEY_PLATFORM=oficina/platform/terraform.tfstate`
+- `TF_STATE_KEY_ENTRYPOINT=oficina/entrypoint/terraform.tfstate`
+
+Nenhuma Repository Variable e criada para VPC, subnets, ALB, Listener, Lambda ARNs,
+API URL/ID ou VPC Link ID: esses valores vem de `config/entrypoint.json`, do SSM
+Parameter Store e dos outputs do Terraform.
 
 O deploy nao usa GitHub protected deployment feature.
 

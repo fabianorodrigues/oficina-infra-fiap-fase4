@@ -1,0 +1,294 @@
+name: Entrypoint Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type APPLY to create the API Gateway, VPC Link and integrations from main.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: entrypoint
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Manual entrypoint deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      TF_STATE_REGION: ${{ vars.TF_STATE_REGION }}
+      TF_STATE_KEY: ${{ vars.TF_STATE_KEY_ENTRYPOINT }}
+      API_NAME: oficina-api
+      VPC_LINK_NAME: oficina
+      HEALTH_HEADER: x-oficina-health-target
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2/3. Guardrails: only main, only the exact confirmation.
+      - name: Validate branch
+        run: test "${GITHUB_REF}" = "refs/heads/main"
+
+      - name: Validate confirmation
+        run: test "${{ inputs.confirmation }}" = "APPLY"
+
+      # 4. Repository Variables must be configured.
+      - name: Validate repository variables
+        run: |
+          set -euo pipefail
+          test -n "${AWS_REGION}"
+          test -n "${TF_STATE_BUCKET}"
+          test -n "${TF_STATE_REGION}"
+          test "${TF_STATE_KEY}" = "oficina/entrypoint/terraform.tfstate"
+          echo 'Repository variables present.'
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+
+      # 5/6. Versioned configuration must be valid before touching AWS.
+      - name: Validate entrypoint configuration
+        shell: pwsh
+        run: ./scripts/validate-entrypoint-config.ps1
+
+      - name: Validate route contract
+        shell: pwsh
+        run: ./scripts/validate-route-contract.ps1
+
+      # 7/8. Credentials and identity.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Validate STS
+        run: aws sts get-caller-identity
+
+      # 9. Terraform backend bucket must exist and be reachable.
+      - name: Validate Terraform backend
+        run: aws s3api head-bucket --bucket "${TF_STATE_BUCKET}"
+
+      # 10. VPC and two private subnets from SSM.
+      - name: Validate VPC and private subnets
+        run: |
+          set -euo pipefail
+          vpc=$(aws ssm get-parameter --name /oficina/infra/vpc/id --query Parameter.Value --output text)
+          subnet1=$(aws ssm get-parameter --name /oficina/infra/subnets/private/1 --query Parameter.Value --output text)
+          subnet2=$(aws ssm get-parameter --name /oficina/infra/subnets/private/2 --query Parameter.Value --output text)
+          test "$subnet1" != "$subnet2"
+          for s in "$subnet1" "$subnet2"; do
+            svpc=$(aws ec2 describe-subnets --subnet-ids "$s" --query 'Subnets[0].VpcId' --output text)
+            test "$svpc" = "$vpc"
+            public=$(aws ec2 describe-subnets --subnet-ids "$s" --query 'Subnets[0].MapPublicIpOnLaunch' --output text)
+            test "$public" = "False"
+          done
+          echo "Private subnets validated in VPC $vpc."
+
+      # 11/12/13/14. Internal ALB with an HTTP 80 listener.
+      - name: Validate internal ALB and listener
+        run: |
+          set -euo pipefail
+          alb_arn=$(aws ssm get-parameter --name /oficina/infra/alb/arn --query Parameter.Value --output text)
+          listener_arn=$(aws ssm get-parameter --name /oficina/infra/alb/listener-arn --query Parameter.Value --output text)
+          scheme=$(aws elbv2 describe-load-balancers --load-balancer-arns "$alb_arn" --query 'LoadBalancers[0].Scheme' --output text)
+          test "$scheme" = "internal"
+          proto=$(aws elbv2 describe-listeners --listener-arns "$listener_arn" --query 'Listeners[0].Protocol' --output text)
+          port=$(aws elbv2 describe-listeners --listener-arns "$listener_arn" --query 'Listeners[0].Port' --output text)
+          test "$proto" = "HTTP"
+          test "$port" = "80"
+          {
+            echo "ALB_ARN=$alb_arn"
+            echo "LISTENER_ARN=$listener_arn"
+          } >> "$GITHUB_ENV"
+          echo "Internal ALB and HTTP 80 listener validated."
+
+      # 15/16. Auth Lambdas and live aliases.
+      - name: Validate Auth Lambdas and live aliases
+        run: |
+          set -euo pipefail
+          for p in /oficina/auth/cpf/function-name /oficina/auth/authorizer/function-name; do
+            fn=$(aws ssm get-parameter --name "$p" --query Parameter.Value --output text)
+            aws lambda get-function --function-name "$fn" >/dev/null
+            aws lambda get-alias --function-name "$fn" --name live >/dev/null
+            echo "Lambda $fn has a live alias."
+          done
+
+      # 17. Ingress health header routing must already exist on the ALB listener.
+      #     Fails before Terraform apply if the three header rules are missing.
+      - name: Validate ingress health header rules
+        run: |
+          set -euo pipefail
+          missing=0
+          for target in cadastro estoque ordens; do
+            found=$(aws elbv2 describe-rules --listener-arn "${LISTENER_ARN}" \
+              --query "length(Rules[?Conditions[?HttpHeaderConfig.HttpHeaderName=='${HEALTH_HEADER}' && contains(HttpHeaderConfig.Values, '${target}')]])" \
+              --output text)
+            if [ "${found}" -lt 1 ]; then echo "Missing health rule for target ${target}."; missing=1; fi
+          done
+          test "${missing}" -eq 0
+          echo "Three ${HEALTH_HEADER} health rules present on the ALB listener."
+
+      # 18. All ALB targets healthy.
+      - name: Validate healthy targets
+        run: |
+          set -euo pipefail
+          tgs=$(aws elbv2 describe-target-groups --load-balancer-arn "${ALB_ARN}" --query 'TargetGroups[].TargetGroupArn' --output text)
+          count=$(echo "$tgs" | wc -w)
+          test "$count" -ge 3
+          unhealthy=0
+          for tg in $tgs; do
+            states=$(aws elbv2 describe-target-health --target-group-arn "$tg" --query 'TargetHealthDescriptions[].TargetHealth.State' --output text)
+            if [ -z "$states" ]; then unhealthy=$((unhealthy+1)); fi
+            for st in $states; do [ "$st" != "healthy" ] && unhealthy=$((unhealthy+1)) || true; done
+          done
+          test "$unhealthy" -eq 0
+          echo "All targets healthy across $count target groups."
+
+      # 19. Terraform fmt.
+      - name: Terraform fmt
+        working-directory: terraform/entrypoint
+        run: terraform fmt -check -recursive
+
+      # 20. Terraform init with the remote backend.
+      - name: Terraform init
+        working-directory: terraform/entrypoint
+        run: |
+          terraform init \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=${TF_STATE_KEY}" \
+            -backend-config="region=${TF_STATE_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      # 21. Terraform validate.
+      - name: Terraform validate
+        working-directory: terraform/entrypoint
+        run: terraform validate
+
+      # 22. TFLint.
+      - name: TFLint
+        working-directory: terraform/entrypoint
+        run: |
+          tflint --init
+          tflint --recursive
+
+      # 23. Checkov.
+      - name: Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform/entrypoint
+          quiet: true
+          framework: terraform
+
+      # 24. Terraform plan to a file.
+      - name: Terraform plan
+        working-directory: terraform/entrypoint
+        run: terraform plan -input=false -out=tfplan
+
+      # 25. Sanitized plan summary (counts and resource types only, no values).
+      - name: Publish plan summary
+        working-directory: terraform/entrypoint
+        run: |
+          set -euo pipefail
+          terraform show -json tfplan > plan.json
+          {
+            echo '### Entrypoint plan (sanitized)'
+            echo
+            echo '| Action | Count |'
+            echo '| ------ | ----- |'
+            for action in create update delete; do
+              c=$(jq "[.resource_changes[] | select(.change.actions | index(\"$action\"))] | length" plan.json)
+              echo "| $action | $c |"
+            done
+            echo
+            echo 'Resource types:'
+            jq -r '[.resource_changes[].type] | unique | .[]' plan.json | sed 's/^/- /'
+          } >> "$GITHUB_STEP_SUMMARY"
+          rm -f plan.json
+
+      # 26. Apply exactly the plan produced in this run.
+      - name: Terraform apply
+        working-directory: terraform/entrypoint
+        run: terraform apply -input=false tfplan
+
+      - name: Capture outputs
+        working-directory: terraform/entrypoint
+        run: |
+          set -euo pipefail
+          {
+            echo "API_ID=$(terraform output -raw api_id)"
+            echo "API_ENDPOINT=$(terraform output -raw api_endpoint)"
+            echo "VPC_LINK_ID=$(terraform output -raw vpc_link_id)"
+          } >> "$GITHUB_ENV"
+
+      # 27/28. Wait (bounded, 30 min) for the VPC Link to become AVAILABLE.
+      - name: Wait for VPC Link AVAILABLE
+        run: |
+          set -euo pipefail
+          echo "Waiting for VPC Link ${VPC_LINK_ID} to become AVAILABLE (timeout 30m)..."
+          deadline=$((SECONDS + 1800))
+          status="none"
+          while [ $SECONDS -lt $deadline ]; do
+            status=$(aws apigatewayv2 get-vpc-link --vpc-link-id "${VPC_LINK_ID}" --query 'VpcLinkStatus' --output text 2>/dev/null || echo "none")
+            echo "VPC Link status: $status"
+            if [ "$status" = "AVAILABLE" ]; then break; fi
+            if [ "$status" = "FAILED" ]; then echo "VPC Link failed."; break; fi
+            sleep 30
+          done
+          if [ "$status" != "AVAILABLE" ]; then
+            aws apigatewayv2 get-vpc-link --vpc-link-id "${VPC_LINK_ID}" || true
+            echo "VPC Link did not reach AVAILABLE."
+            exit 1
+          fi
+
+      # 29-36. Read-only validation of API, stage, routes, authorizer,
+      #        integrations, permissions, access logs and SSM outputs.
+      - name: Read-only entrypoint validation
+        shell: pwsh
+        run: ./scripts/validate-entrypoint.ps1 -Region "$env:AWS_REGION" -ApiName "$env:API_NAME" -VpcLinkName "$env:VPC_LINK_NAME"
+
+      # 37. Smoke test the public API.
+      - name: Smoke test API
+        shell: pwsh
+        run: ./scripts/smoke-test-api.ps1 -BaseUrl "$env:API_ENDPOINT"
+
+      # On failure, capture bounded diagnostics without mutating anything.
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          aws apigatewayv2 get-vpc-links --query "Items[?Name=='${VPC_LINK_NAME}']" || true
+          aws apigatewayv2 get-apis --query "Items[?Name=='${API_NAME}']" || true
+
+      # 39. Sanitized step summary.
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '### Entrypoint Deploy'
+            echo
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- API name: ${API_NAME}"
+            echo "- API id: ${API_ID:-unknown}"
+            echo "- API endpoint: ${API_ENDPOINT:-unknown}"
+            echo "- Stage: \$default"
+            echo "- VPC Link: ${VPC_LINK_NAME} (${VPC_LINK_ID:-unknown})"
+            echo "- ALB listener: ${LISTENER_ARN:-unknown}"
+            echo "- Health header: ${HEALTH_HEADER}"
+            echo "- SSM published: /oficina/infra/api/id, url, execution-arn, stage, vpc-link-id"
+            echo
+            echo 'Sensitive values (credentials, tokens, JWT, CPF, payloads) are not printed.'
+          } >> "$GITHUB_STEP_SUMMARY"

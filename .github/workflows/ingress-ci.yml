@@ -1,0 +1,169 @@
+name: Ingress CI
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'config/ingress-routes.json'
+      - 'config/resource-contract.yml'
+      - 'deploy/k8s/ingress/**'
+      - 'scripts/validate-ingress-config.ps1'
+      - 'scripts/render-ingress.ps1'
+      - 'scripts/validate-ingress.ps1'
+      - 'scripts/smoke-test-internal-alb.ps1'
+      - '.github/workflows/ingress-*.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  static-validation:
+    name: Static validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.30.5
+
+      # Disposable local cluster (not EKS, no AWS) so the client dry-run can resolve
+      # built-in schemas offline. --dry-run=client creates nothing.
+      - name: Setup throwaway kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ingress-ci
+
+      - name: Validate JSON is well formed
+        run: jq empty config/ingress-routes.json
+
+      - name: Validate ingress configuration
+        shell: pwsh
+        run: ./scripts/validate-ingress-config.ps1
+
+      - name: Validate SSM contract outputs
+        shell: pwsh
+        run: |
+          $contract = Get-Content config/resource-contract.yml -Raw
+          $expected = @(
+            'albArn: /oficina/infra/alb/arn',
+            'albListenerArn: /oficina/infra/alb/listener-arn',
+            'albDnsName: /oficina/infra/alb/dns'
+          )
+          foreach ($e in $expected) {
+            if ($contract -notmatch [regex]::Escape($e)) { throw "resource-contract.yml is missing output '$e'." }
+          }
+          Write-Host 'SSM contract outputs are present.'
+
+      - name: PowerShell AST
+        shell: pwsh
+        run: |
+          $scripts = @(
+            'scripts/validate-ingress-config.ps1',
+            'scripts/render-ingress.ps1',
+            'scripts/validate-ingress.ps1',
+            'scripts/smoke-test-internal-alb.ps1'
+          )
+          foreach ($file in $scripts) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | Format-List | Out-String | Write-Error
+              throw "PowerShell parse errors in $file."
+            }
+          }
+          Write-Host 'PowerShell AST parse succeeded.'
+
+      - name: Render ingress with synthetic subnets
+        shell: pwsh
+        run: |
+          ./scripts/render-ingress.ps1 `
+            -OutputDirectory "$env:RUNNER_TEMP/ingress" `
+            -PrivateSubnet1 'subnet-00000000000000001' `
+            -PrivateSubnet2 'subnet-00000000000000002'
+
+      - name: Confirm no placeholders remain
+        shell: pwsh
+        run: |
+          $rendered = Get-Content "$env:RUNNER_TEMP/ingress/ingress.rendered.yaml" -Raw
+          if ($rendered -match '__[A-Z0-9_]+__') { throw 'Rendered manifest still contains placeholders.' }
+          Write-Host 'No placeholders in rendered manifest.'
+
+      - name: Kubeconform
+        run: |
+          set -euo pipefail
+          version=v0.6.7
+          curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
+          tar -xf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -summary "$RUNNER_TEMP/ingress/ingress.rendered.yaml"
+
+      - name: kubectl apply dry-run (client)
+        run: kubectl apply --dry-run=client -f "$RUNNER_TEMP/ingress/ingress.rendered.yaml"
+
+      - name: Actionlint
+        uses: raven-actions/actionlint@v2
+
+      - name: Static safety searches
+        shell: pwsh
+        run: |
+          $rendered = "$env:RUNNER_TEMP/ingress/ingress.rendered.yaml"
+          $template = 'deploy/k8s/ingress/ingress.template.yaml'
+          $config = 'config/ingress-routes.json'
+          $manifestFiles = @($rendered, $config)
+          $ingressFiles = @($config, 'deploy/k8s/ingress/*', 'scripts/validate-ingress-config.ps1', 'scripts/render-ingress.ps1', 'scripts/validate-ingress.ps1', 'scripts/smoke-test-internal-alb.ps1', '.github/workflows/ingress-ci.yml', '.github/workflows/ingress-deploy.yml', 'README.md')
+
+          function Assert-NoMatch {
+            param([string[]]$Files, [string]$Pattern, [string]$Label)
+            $found = Select-String -Path $Files -Pattern $Pattern -SimpleMatch -ErrorAction SilentlyContinue
+            if ($found) {
+              $found | Format-Table Path, LineNumber, Line -AutoSize | Out-String | Write-Host
+              throw "Forbidden pattern found ($Label)."
+            }
+          }
+
+          # Public ALB / open CIDR must never appear in manifest, template or config.
+          Assert-NoMatch @($rendered, $template, $config) ('internet' + '-facing') 'internet-facing'
+          Assert-NoMatch @($rendered, $template, $config) '0.0.0.0/0' 'open-cidr'
+
+          # No Service LoadBalancer / NodePort inside the ingress manifests.
+          Assert-NoMatch @('deploy/k8s/ingress/*', $rendered) ('type: ' + 'LoadBalancer') 'service-loadbalancer'
+          Assert-NoMatch @('deploy/k8s/ingress/*', $rendered) ('type: ' + 'NodePort') 'service-nodeport'
+
+          # Forbidden routes only checked where real paths live (manifest + config).
+          foreach ($p in @(('path: ' + '/api/internal'), ('path: ' + '/api/dev'), ('path: ' + '/ready'))) {
+            Assert-NoMatch $manifestFiles $p "route:$p"
+          }
+
+          # Catch-all / generic /api paths (anchored so /api/admin does not false-positive).
+          if (Select-String -Path $rendered -Pattern '^\s*- path: /\s*$' -ErrorAction SilentlyContinue) { throw 'Catch-all path / present.' }
+          if (Select-String -Path $rendered -Pattern '^\s*- path: /api\s*$' -ErrorAction SilentlyContinue) { throw 'Generic /api path present.' }
+
+          # Secret assignments must never carry a value.
+          foreach ($s in @(('AWS_ACCESS_KEY_ID' + '='), ('AWS_SECRET_ACCESS_KEY' + '='), ('AWS_SESSION_TOKEN' + '='))) {
+            $m = Select-String -Path $ingressFiles -Pattern ($s + '\S') -ErrorAction SilentlyContinue
+            if ($m) { $m | Format-Table Path, LineNumber -AutoSize | Out-String | Write-Host; throw "Secret value assignment found ($s)." }
+          }
+
+          # No references to the previous academic phase.
+          Assert-NoMatch $ingressFiles ('Fase' + '3') 'legacy-phase'
+          Assert-NoMatch $ingressFiles ('fase' + '-3') 'legacy-phase-dash'
+
+          # No destructive infra operations (temporary-pod cleanup is allowed).
+          Assert-NoMatch @('.github/workflows/ingress-ci.yml', '.github/workflows/ingress-deploy.yml', 'scripts/validate-ingress.ps1', 'scripts/render-ingress.ps1', 'scripts/validate-ingress-config.ps1') ('terraform ' + 'destroy') 'tf-destroy'
+          Assert-NoMatch @('.github/workflows/ingress-ci.yml', '.github/workflows/ingress-deploy.yml', 'scripts/validate-ingress.ps1', 'scripts/smoke-test-internal-alb.ps1') ('delete-' + 'load-balancer') 'delete-alb'
+          Assert-NoMatch @('.github/workflows/ingress-ci.yml', '.github/workflows/ingress-deploy.yml', 'scripts/validate-ingress.ps1', 'scripts/smoke-test-internal-alb.ps1') ('kubectl delete ' + 'ingress') 'delete-ingress'
+
+          Write-Host 'Static safety searches passed.'
+
+      - name: Summary
+        run: |
+          {
+            echo '### Ingress CI'
+            echo
+            echo 'Static validation concluida. Nenhum recurso AWS foi acessado.'
+            echo 'O ALB interno real sera criado apenas pelo Ingress Deploy apos merge na main.'
+          } >> "$GITHUB_STEP_SUMMARY"

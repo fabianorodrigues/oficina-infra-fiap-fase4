@@ -1,0 +1,360 @@
+{
+  "version": 1,
+  "api": {
+    "name": "oficina-api",
+    "protocolType": "HTTP",
+    "stageName": "$default",
+    "autoDeploy": true,
+    "disableExecuteApiEndpoint": false
+  },
+  "vpcLink": {
+    "name": "oficina",
+    "vpcIdParameter": "/oficina/infra/vpc/id",
+    "privateSubnet1Parameter": "/oficina/infra/subnets/private/1",
+    "privateSubnet2Parameter": "/oficina/infra/subnets/private/2",
+    "albArnParameter": "/oficina/infra/alb/arn",
+    "albListenerArnParameter": "/oficina/infra/alb/listener-arn"
+  },
+  "auth": {
+    "authCpfAliasArnParameter": "/oficina/auth/cpf/alias-arn",
+    "authCpfFunctionNameParameter": "/oficina/auth/cpf/function-name",
+    "authorizerAliasArnParameter": "/oficina/auth/authorizer/alias-arn",
+    "authorizerFunctionNameParameter": "/oficina/auth/authorizer/function-name",
+    "alias": "live",
+    "payloadFormatVersion": "2.0",
+    "enableSimpleResponses": true,
+    "resultTtlSeconds": 0,
+    "identitySources": [
+      "$request.header.Authorization"
+    ]
+  },
+  "integration": {
+    "albPayloadFormatVersion": "1.0",
+    "lambdaPayloadFormatVersion": "2.0",
+    "timeoutMilliseconds": 29000,
+    "overwritePath": "$request.path"
+  },
+  "trustedIdentity": {
+    "headers": {
+      "x-oficina-user-id": "$context.authorizer.sub",
+      "x-oficina-user-cpf": "$context.authorizer.cpf",
+      "x-oficina-user-role": "$context.authorizer.role",
+      "x-oficina-user-name": "$context.authorizer.name",
+      "x-oficina-token-jti": "$context.authorizer.jti"
+    },
+    "requestIdHeader": "x-oficina-request-id",
+    "requestIdSource": "$context.requestId"
+  },
+  "health": {
+    "internalPath": "/health",
+    "targetHeader": "x-oficina-health-target",
+    "targets": [
+      "cadastro",
+      "estoque",
+      "ordens"
+    ]
+  },
+  "logging": {
+    "logGroupName": "/aws/apigateway/oficina-api",
+    "retentionInDays": 14,
+    "detailedMetricsEnabled": true
+  },
+  "throttling": {
+    "rateLimit": 20,
+    "burstLimit": 40
+  },
+  "cors": {
+    "enabled": false,
+    "allowOrigins": [],
+    "allowMethods": [],
+    "allowHeaders": [],
+    "exposeHeaders": [],
+    "allowCredentials": false,
+    "maxAgeSeconds": 300
+  },
+  "routes": [
+    {
+      "id": "auth-cpf",
+      "routeKey": "POST /api/auth/cpf",
+      "destination": "AUTH_LAMBDA",
+      "backend": "auth",
+      "authorizationType": "NONE",
+      "policy": "AllowAnonymous",
+      "requiredRoles": []
+    },
+    {
+      "id": "health-cadastro",
+      "routeKey": "GET /health/cadastro",
+      "destination": "ALB_HEALTH",
+      "backend": "cadastro",
+      "healthTarget": "cadastro",
+      "authorizationType": "NONE",
+      "policy": "AllowAnonymous",
+      "requiredRoles": []
+    },
+    {
+      "id": "health-estoque",
+      "routeKey": "GET /health/estoque",
+      "destination": "ALB_HEALTH",
+      "backend": "estoque",
+      "healthTarget": "estoque",
+      "authorizationType": "NONE",
+      "policy": "AllowAnonymous",
+      "requiredRoles": []
+    },
+    {
+      "id": "health-ordens",
+      "routeKey": "GET /health/ordens",
+      "destination": "ALB_HEALTH",
+      "backend": "ordens",
+      "healthTarget": "ordens",
+      "authorizationType": "NONE",
+      "policy": "AllowAnonymous",
+      "requiredRoles": []
+    },
+    {
+      "id": "ordens-orcamentos-acoes-externas",
+      "routeKey": "GET /api/orcamentos/acoes-externas/{proxy+}",
+      "destination": "ALB_PUBLIC",
+      "backend": "ordens",
+      "authorizationType": "NONE",
+      "policy": "AllowAnonymous",
+      "requiredRoles": []
+    },
+    {
+      "id": "cadastro-clientes",
+      "routeKey": "ANY /api/clientes",
+      "destination": "ALB_PROTECTED",
+      "backend": "cadastro",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "cadastro-clientes-proxy",
+      "routeKey": "ANY /api/clientes/{proxy+}",
+      "destination": "ALB_PROTECTED",
+      "backend": "cadastro",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "cadastro-veiculos",
+      "routeKey": "ANY /api/veiculos",
+      "destination": "ALB_PROTECTED",
+      "backend": "cadastro",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "cadastro-veiculos-proxy",
+      "routeKey": "ANY /api/veiculos/{proxy+}",
+      "destination": "ALB_PROTECTED",
+      "backend": "cadastro",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "cadastro-servicos",
+      "routeKey": "ANY /api/servicos",
+      "destination": "ALB_PROTECTED",
+      "backend": "cadastro",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "cadastro-servicos-proxy",
+      "routeKey": "ANY /api/servicos/{proxy+}",
+      "destination": "ALB_PROTECTED",
+      "backend": "cadastro",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "cadastro-admin-funcionarios",
+      "routeKey": "ANY /api/admin/funcionarios",
+      "destination": "ALB_PROTECTED",
+      "backend": "cadastro",
+      "authorizationType": "CUSTOM",
+      "policy": "AdminOnly",
+      "requiredRoles": ["Admin"]
+    },
+    {
+      "id": "cadastro-admin-funcionarios-proxy",
+      "routeKey": "ANY /api/admin/funcionarios/{proxy+}",
+      "destination": "ALB_PROTECTED",
+      "backend": "cadastro",
+      "authorizationType": "CUSTOM",
+      "policy": "AdminOnly",
+      "requiredRoles": ["Admin"]
+    },
+    {
+      "id": "estoque-estoque",
+      "routeKey": "ANY /api/estoque",
+      "destination": "ALB_PROTECTED",
+      "backend": "estoque",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "estoque-estoque-proxy",
+      "routeKey": "ANY /api/estoque/{proxy+}",
+      "destination": "ALB_PROTECTED",
+      "backend": "estoque",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "estoque-insumos",
+      "routeKey": "ANY /api/insumos",
+      "destination": "ALB_PROTECTED",
+      "backend": "estoque",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "estoque-insumos-proxy",
+      "routeKey": "ANY /api/insumos/{proxy+}",
+      "destination": "ALB_PROTECTED",
+      "backend": "estoque",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "estoque-pecas",
+      "routeKey": "ANY /api/pecas",
+      "destination": "ALB_PROTECTED",
+      "backend": "estoque",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "estoque-pecas-proxy",
+      "routeKey": "ANY /api/pecas/{proxy+}",
+      "destination": "ALB_PROTECTED",
+      "backend": "estoque",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "ordens-ordens-servico",
+      "routeKey": "ANY /api/ordens-servico",
+      "destination": "ALB_PROTECTED",
+      "backend": "ordens",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "ordens-ordens-servico-proxy",
+      "routeKey": "ANY /api/ordens-servico/{proxy+}",
+      "destination": "ALB_PROTECTED",
+      "backend": "ordens",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "ordens-minhas-ordens-servico",
+      "routeKey": "ANY /api/minhas-ordens-servico",
+      "destination": "ALB_PROTECTED",
+      "backend": "ordens",
+      "authorizationType": "CUSTOM",
+      "policy": "ClienteOnly",
+      "requiredRoles": ["Cliente"]
+    },
+    {
+      "id": "ordens-minhas-ordens-servico-proxy",
+      "routeKey": "ANY /api/minhas-ordens-servico/{proxy+}",
+      "destination": "ALB_PROTECTED",
+      "backend": "ordens",
+      "authorizationType": "CUSTOM",
+      "policy": "ClienteOnly",
+      "requiredRoles": ["Cliente"]
+    },
+    {
+      "id": "ordens-orcamentos",
+      "routeKey": "ANY /api/orcamentos",
+      "destination": "ALB_PROTECTED",
+      "backend": "ordens",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "ordens-orcamentos-proxy",
+      "routeKey": "ANY /api/orcamentos/{proxy+}",
+      "destination": "ALB_PROTECTED",
+      "backend": "ordens",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "ordens-meus-orcamentos",
+      "routeKey": "ANY /api/meus-orcamentos",
+      "destination": "ALB_PROTECTED",
+      "backend": "ordens",
+      "authorizationType": "CUSTOM",
+      "policy": "ClienteOnly",
+      "requiredRoles": ["Cliente"]
+    },
+    {
+      "id": "ordens-meus-orcamentos-proxy",
+      "routeKey": "ANY /api/meus-orcamentos/{proxy+}",
+      "destination": "ALB_PROTECTED",
+      "backend": "ordens",
+      "authorizationType": "CUSTOM",
+      "policy": "ClienteOnly",
+      "requiredRoles": ["Cliente"]
+    },
+    {
+      "id": "ordens-relatorios",
+      "routeKey": "ANY /api/relatorios",
+      "destination": "ALB_PROTECTED",
+      "backend": "ordens",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    },
+    {
+      "id": "ordens-relatorios-proxy",
+      "routeKey": "ANY /api/relatorios/{proxy+}",
+      "destination": "ALB_PROTECTED",
+      "backend": "ordens",
+      "authorizationType": "CUSTOM",
+      "policy": "FuncionarioOuAdmin",
+      "requiredRoles": ["Funcionario", "Admin"]
+    }
+  ],
+  "publicAllowlist": [
+    "POST /api/auth/cpf",
+    "GET /health/cadastro",
+    "GET /health/estoque",
+    "GET /health/ordens",
+    "GET /api/orcamentos/acoes-externas/{proxy+}"
+  ],
+  "forbiddenRoutePrefixes": [
+    "/ready",
+    "/api/internal",
+    "/api/dev"
+  ],
+  "ssmOutputs": {
+    "apiId": "/oficina/infra/api/id",
+    "apiUrl": "/oficina/infra/api/url",
+    "apiExecutionArn": "/oficina/infra/api/execution-arn",
+    "stage": "/oficina/infra/api/stage",
+    "vpcLinkId": "/oficina/infra/api/vpc-link-id"
+  }
+}

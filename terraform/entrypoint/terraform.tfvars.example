@@ -1,0 +1,6 @@
+aws_region = "us-east-1"
+
+# Leave empty to auto-detect the ALB frontend security group from the internal
+# ALB. Set explicitly only if auto-detection reports ambiguity (more than one
+# non-backend security group on the ALB).
+# alb_frontend_security_group_id = ""
