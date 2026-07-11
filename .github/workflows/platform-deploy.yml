@@ -1,0 +1,148 @@
+name: Platform Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type APPLY to provision the shared platform from main.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Manual platform deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate branch
+        run: |
+          test "${GITHUB_REF}" = "refs/heads/main"
+
+      - name: Validate confirmation
+        run: |
+          test "${{ inputs.confirmation }}" = "APPLY"
+
+      - name: Validate repository variables
+        run: |
+          test -n "${{ vars.AWS_REGION }}"
+          test -n "${{ vars.TF_STATE_BUCKET }}"
+          test -n "${{ vars.TF_STATE_REGION }}"
+          test "${{ vars.TF_STATE_KEY_PLATFORM }}" = "oficina/platform/terraform.tfstate"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Validate STS and backend
+        run: |
+          aws sts get-caller-identity
+          aws s3api head-bucket --bucket "${{ vars.TF_STATE_BUCKET }}"
+
+      - name: Validate Infra DB SSM prerequisites
+        run: |
+          for name in \
+            /oficina/infra/vpc/id \
+            /oficina/infra/subnets/public/1 \
+            /oficina/infra/subnets/public/2 \
+            /oficina/infra/subnets/private/1 \
+            /oficina/infra/subnets/private/2 \
+            /oficina/infra/rds/security-group-id \
+            /oficina/infra/rds/master-secret-arn; do
+            aws ssm get-parameter --name "$name" --region "${{ vars.AWS_REGION }}" > "$RUNNER_TEMP/ssm-parameter.json"
+          done
+
+      - name: Validate versioned config
+        shell: pwsh
+        run: ./scripts/validate-platform-config.ps1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+
+      - name: Terraform fmt
+        working-directory: terraform/platform
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        working-directory: terraform/platform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ vars.TF_STATE_KEY_PLATFORM }}" \
+            -backend-config="region=${{ vars.TF_STATE_REGION }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform validate
+        working-directory: terraform/platform
+        run: terraform validate
+
+      - name: TFLint
+        working-directory: terraform/platform
+        run: |
+          tflint --init
+          tflint --recursive
+
+      - name: Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform/platform
+          quiet: true
+          framework: terraform
+
+      - name: Terraform plan
+        working-directory: terraform/platform
+        run: terraform plan -var="aws_region=${{ vars.AWS_REGION }}" -out=tfplan
+
+      - name: Terraform plan summary
+        working-directory: terraform/platform
+        run: terraform show -no-color tfplan | sed -E 's/(password|token|secret|license)([^[:space:]]*)/REDACTED/Ig' | tee plan-summary.txt
+
+      - name: Terraform apply approved plan
+        working-directory: terraform/platform
+        run: terraform apply -auto-approve tfplan
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name oficina --region "${{ vars.AWS_REGION }}"
+
+      - name: Wait for EKS and node group
+        run: |
+          aws eks wait cluster-active --name oficina --region "${{ vars.AWS_REGION }}"
+          aws eks wait nodegroup-active --cluster-name oficina --nodegroup-name oficina --region "${{ vars.AWS_REGION }}"
+          kubectl wait --for=condition=Ready nodes --all --timeout=20m
+
+      - name: Validate add-ons and Helm releases
+        run: |
+          aws eks list-addons --cluster-name oficina --region "${{ vars.AWS_REGION }}"
+          helm list -A
+
+      - name: Read-only platform validation
+        shell: pwsh
+        run: ./scripts/validate-platform.ps1 -AwsRegion '${{ vars.AWS_REGION }}'
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '### Platform Deploy'
+            echo
+            echo 'Manual platform workflow finished. Sensitive values are not printed here.'
+          } >> "$GITHUB_STEP_SUMMARY"

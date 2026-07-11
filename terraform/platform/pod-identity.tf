@@ -1,0 +1,27 @@
+resource "aws_eks_pod_identity_association" "workload" {
+  for_each = local.workload_mode == "pod-identity" ? local.workload_service_accounts : {}
+
+  cluster_name    = aws_eks_cluster.this.name
+  namespace       = local.namespace
+  service_account = each.key
+  role_arn        = aws_iam_role.workload[each.key].arn
+
+  depends_on = [
+    aws_eks_addon.managed,
+    kubernetes_service_account.workload
+  ]
+}
+
+resource "aws_eks_pod_identity_association" "load_balancer_controller" {
+  count = local.workload_mode == "pod-identity" ? 1 : 0
+
+  cluster_name    = aws_eks_cluster.this.name
+  namespace       = "kube-system"
+  service_account = kubernetes_service_account.load_balancer_controller.metadata[0].name
+  role_arn        = aws_iam_role.load_balancer_controller.arn
+
+  depends_on = [
+    aws_eks_addon.managed,
+    kubernetes_service_account.load_balancer_controller
+  ]
+}

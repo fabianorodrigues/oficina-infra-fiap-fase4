@@ -1,0 +1,138 @@
+name: Platform CI
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'config/**'
+      - 'terraform/platform/**'
+      - 'deploy/platform/**'
+      - 'scripts/validate-platform*.ps1'
+      - '.github/workflows/platform-*.yml'
+      - '.tflint.hcl'
+
+permissions:
+  contents: read
+
+jobs:
+  static-validation:
+    name: Static validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+
+      - name: Validate versioned config
+        shell: pwsh
+        run: ./scripts/validate-platform-config.ps1
+
+      - name: PowerShell AST
+        shell: pwsh
+        run: |
+          foreach ($file in @('scripts/validate-platform-config.ps1', 'scripts/validate-platform.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | Format-List | Out-String | Write-Error
+            }
+          }
+
+      - name: Terraform fmt
+        working-directory: terraform/platform
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        working-directory: terraform/platform
+        run: terraform init -backend=false
+
+      - name: Terraform validate
+        working-directory: terraform/platform
+        run: terraform validate
+
+      - name: Terraform providers
+        working-directory: terraform/platform
+        run: terraform providers
+
+      - name: TFLint
+        working-directory: terraform/platform
+        run: |
+          tflint --init
+          tflint --recursive
+
+      - name: Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform/platform
+          quiet: true
+          framework: terraform
+
+      - name: Helm lint and template
+        run: |
+          set -euo pipefail
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo add secrets-store-csi-driver https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts
+          helm repo add ascp https://aws.github.io/secrets-store-csi-driver-provider-aws
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm repo add newrelic https://helm-charts.newrelic.com
+          helm repo update
+          helm lint eks/aws-load-balancer-controller -f deploy/platform/aws-load-balancer-controller/values.yaml --set clusterName=oficina --set region=us-east-1 --set vpcId=vpc-00000000000000000
+          helm template aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system -f deploy/platform/aws-load-balancer-controller/values.yaml --set clusterName=oficina --set region=us-east-1 --set vpcId=vpc-00000000000000000 > "$RUNNER_TEMP/aws-lbc.yaml"
+          helm lint secrets-store-csi-driver/secrets-store-csi-driver -f deploy/platform/secrets-store-csi-driver/values.yaml
+          helm template secrets-store-csi-driver secrets-store-csi-driver/secrets-store-csi-driver -n kube-system -f deploy/platform/secrets-store-csi-driver/values.yaml > "$RUNNER_TEMP/secrets-store-csi-driver.yaml"
+          helm lint ascp/secrets-store-csi-driver-provider-aws -f deploy/platform/ascp/values.yaml
+          helm template secrets-store-csi-driver-provider-aws ascp/secrets-store-csi-driver-provider-aws -n kube-system -f deploy/platform/ascp/values.yaml > "$RUNNER_TEMP/ascp.yaml"
+          helm lint open-telemetry/opentelemetry-collector -f deploy/platform/opentelemetry-collector/values.yaml --set mode=deployment
+          helm template opentelemetry-collector open-telemetry/opentelemetry-collector -n oficina -f deploy/platform/opentelemetry-collector/values.yaml --set mode=deployment > "$RUNNER_TEMP/opentelemetry-collector.yaml"
+          helm lint newrelic/nri-bundle -f deploy/platform/newrelic/values.yaml --set global.cluster=oficina
+          helm template newrelic-bundle newrelic/nri-bundle -n newrelic -f deploy/platform/newrelic/values.yaml --set global.cluster=oficina > "$RUNNER_TEMP/newrelic.yaml"
+
+      - name: Actionlint
+        uses: raven-actions/actionlint@v2
+
+      - name: Static safety searches
+        shell: pwsh
+        run: |
+          $patterns = @(
+            ('AWS_ACCESS_KEY_ID' + '='),
+            ('AWS_SECRET_ACCESS_KEY' + '='),
+            ('AWS_SESSION_TOKEN' + '='),
+            ('secret' + '_string'),
+            ('secret' + '_binary'),
+            ('aws_secretsmanager_secret' + '_version'),
+            ('terraform ' + 'destroy'),
+            ('force' + '_destroy'),
+            ('terraform' + '_remote_state'),
+            ('Fase' + '3'),
+            ('fase' + '-3'),
+            ('/' + 'dev/'),
+            ('-' + 'dev'),
+            ('-' + 'hml'),
+            ('-' + 'prod'),
+            ('environ' + 'ment')
+          )
+          foreach ($pattern in $patterns) {
+            $matches = Select-String -Path config/*,terraform/platform/*,deploy/platform/*,scripts/*,.github/workflows/*,.tflint.hcl,README.md -Pattern $pattern -SimpleMatch -ErrorAction SilentlyContinue
+            if ($matches -and $pattern -notin @(('AWS_ACCESS_KEY_ID' + '='), ('AWS_SECRET_ACCESS_KEY' + '='), ('AWS_SESSION_TOKEN' + '='), ('environ' + 'ment'))) {
+              $matches | Format-Table Path, LineNumber, Line -AutoSize
+              throw "Forbidden pattern found: $pattern"
+            }
+          }
+
+      - name: Summary
+        run: |
+          {
+            echo '### Platform CI'
+            echo
+            echo 'Validacao estatica concluida.'
+            echo 'O Terraform Plan real sera executado pelo Platform Deploy.'
+          } >> "$GITHUB_STEP_SUMMARY"

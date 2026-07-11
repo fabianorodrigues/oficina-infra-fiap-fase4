@@ -1,0 +1,44 @@
+project:
+  name: oficina
+  academicProject: fiap-fase4
+
+cluster:
+  name: oficina
+  namespace: oficina
+  kubernetesVersion: ""
+  endpointPublicAccess: true
+  endpointPrivateAccess: true
+  publicAccessCidrs:
+    - "0.0.0.0/0"
+
+nodeGroup:
+  name: oficina
+  instanceTypes:
+    - t3.medium
+  desiredSize: 1
+  minSize: 1
+  maxSize: 2
+  diskSize: 30
+  capacityType: ON_DEMAND
+
+ecr:
+  cadastro: oficina-cadastro
+  estoque: oficina-estoque
+  ordens: oficina-ordens-servico
+  imageTagMutability: IMMUTABLE
+  scanOnPush: true
+  retainedImages: 20
+
+sqs:
+  longPollingSeconds: 20
+  visibilityTimeoutSeconds: 60
+  maxReceiveCount: 3
+  messageRetentionSeconds: 345600
+  dlqRetentionSeconds: 1209600
+
+workloadIdentity:
+  mode: pod-identity
+
+observability:
+  enableNewRelic: false
+  newRelicSecretName: /oficina/observability/new-relic

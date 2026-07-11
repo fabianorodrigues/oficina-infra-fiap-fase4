@@ -1,0 +1,8 @@
+aws_region = "us-east-1"
+
+# Leave chart versions empty to let Helm resolve the current compatible chart from each repository.
+load_balancer_controller_chart_version = ""
+secrets_store_csi_driver_chart_version = ""
+ascp_chart_version                     = ""
+opentelemetry_collector_chart_version  = ""
+newrelic_chart_version                 = ""

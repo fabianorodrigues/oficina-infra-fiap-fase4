@@ -1,0 +1,17 @@
+global:
+  cluster: ${cluster_name}
+  licenseKey: ""
+  customSecretName: newrelic-license
+  customSecretLicenseKey: licenseKey
+newrelic-infrastructure:
+  enabled: true
+nri-metadata-injection:
+  enabled: true
+kube-state-metrics:
+  enabled: true
+newrelic-logging:
+  enabled: false
+newrelic-prometheus-agent:
+  enabled: false
+newrelic-k8s-metrics-adapter:
+  enabled: false
