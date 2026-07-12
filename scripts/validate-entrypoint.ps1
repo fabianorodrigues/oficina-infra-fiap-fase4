@@ -1,13 +1,14 @@
 # Read-only validation of the deployed Entrypoint stack. Performs describe/get
 # calls only. It never creates, updates, deletes or puts any resource. Intended
-# to run after Entrypoint Deploy (AWS Academy required). Exits non-zero on any
-# discrepancy against config/entrypoint.json.
+# to run after Entrypoint Deploy, with AWS credentials configured. Exits
+# non-zero on any discrepancy against config/entrypoint.json.
 # Targets PowerShell 7 (pwsh).
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Region,
     [string]$ApiName = 'oficina-api',
     [string]$VpcLinkName = 'oficina',
+    [string]$AlbName = 'oficina',
     [string]$AwsProfile,
     [string]$ConfigPath
 )
@@ -72,14 +73,15 @@ else {
     Add-Ok "VPC Link subnets $($vpcLink.SubnetIds -join ',')"
 }
 
-# 4. Internal ALB, listener HTTP 80, listener ARN used by integrations.
-$albArn = Get-Ssm $config.vpcLink.albArnParameter
-$listenerArn = Get-Ssm $config.vpcLink.albListenerArnParameter
-$lb = Invoke-Aws @('elbv2', 'describe-load-balancers', '--load-balancer-arns', $albArn)
+# 4. Internal ALB, listener HTTP 80, listener ARN used by integrations. The ALB
+#    is discovered by name and tags, not by an SSM handoff.
+$lb = Invoke-Aws @('elbv2', 'describe-load-balancers', '--names', $AlbName)
+$albArn = $lb.LoadBalancers[0].LoadBalancerArn
 if ($lb.LoadBalancers[0].Scheme -ne 'internal') { Add-Failure "ALB scheme is '$($lb.LoadBalancers[0].Scheme)', expected internal." } else { Add-Ok 'ALB internal' }
 $listeners = Invoke-Aws @('elbv2', 'describe-listeners', '--load-balancer-arn', $albArn)
 $listener80 = @($listeners.Listeners | Where-Object { $_.Port -eq 80 -and $_.Protocol -eq 'HTTP' })[0]
 if ($null -eq $listener80) { Add-Failure 'ALB HTTP 80 listener not found.' } else { Add-Ok 'ALB HTTP 80 listener present' }
+$listenerArn = $listener80.ListenerArn
 
 # 5. Integrations point to the listener ARN (private) or the Auth alias (lambda).
 $integrations = Invoke-Aws @('apigatewayv2', 'get-integrations', '--api-id', $apiId)

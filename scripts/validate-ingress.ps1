@@ -124,12 +124,6 @@ if ($httpListener) {
     if ($rulePatterns | Where-Object { $_ -eq '/*' -or $_ -eq '/' }) { Add-Failure 'A catch-all listener rule ( / or /* ) is present.' }
 }
 
-# --- 7. SSM outputs published ---------------------------------------------
-foreach ($p in @($config.ssmOutputs.loadBalancerArn, $config.ssmOutputs.listenerArn, $config.ssmOutputs.dnsName)) {
-    $val = (Invoke-Aws @('ssm', 'get-parameter', '--name', $p)).Parameter.Value
-    if ([string]::IsNullOrWhiteSpace($val)) { Add-Failure "SSM parameter '$p' is empty." } else { Add-Ok "SSM parameter '$p' is present." }
-}
-
 # --- Result ---------------------------------------------------------------
 if ($failures.Count -gt 0) {
     throw "Ingress post-deploy validation failed with $($failures.Count) issue(s)."

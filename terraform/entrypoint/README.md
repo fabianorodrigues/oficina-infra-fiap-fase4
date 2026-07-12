@@ -106,8 +106,9 @@ Nas integracoes publicas e de health esses headers sao **removidos**. O header
 ## Estado e comunicacao entre stacks
 
 - Backend S3 independente: `oficina/entrypoint/terraform.tfstate`.
-- Sem `terraform_remote_state`. A comunicacao com Infra DB, Platform, Auth e
-  Ingress ocorre apenas por SSM Parameter Store e data sources AWS.
+- Sem `terraform_remote_state`. A comunicacao com Infra DB e Auth ocorre por SSM
+  Parameter Store; o ALB interno (Ingress, aplicado no mesmo workflow) e
+  descoberto por nome e porta via data source AWS, sem handoff por SSM.
 
 Entradas (SSM):
 
@@ -115,12 +116,17 @@ Entradas (SSM):
 /oficina/infra/vpc/id
 /oficina/infra/subnets/private/1
 /oficina/infra/subnets/private/2
-/oficina/infra/alb/arn
-/oficina/infra/alb/listener-arn
 /oficina/auth/cpf/function-name
 /oficina/auth/cpf/alias-arn
 /oficina/auth/authorizer/function-name
 /oficina/auth/authorizer/alias-arn
+```
+
+Entrada por data source AWS (descoberta por nome, sem SSM):
+
+```text
+ALB interno "oficina" (data "aws_lb")
+Listener HTTP:80 do ALB (data "aws_lb_listener")
 ```
 
 Saidas (SSM, String):
@@ -184,16 +190,10 @@ mutantes localmente.
 GitHub -> Actions -> Entrypoint Deploy -> Run workflow -> Branch main -> confirmation APPLY
 ```
 
-Ordem obrigatoria:
-
-```text
-1. Ingress Deploy atualizado (regras de health por header no ALB)
-2. Confirmar ALB e targets saudaveis
-3. Entrypoint Deploy
-```
-
-O `Entrypoint Deploy` falha antes do `terraform apply` se as tres regras de health
-por header ainda nao existirem no listener do ALB.
+O workflow `Entrypoint Deploy` aplica o Ingress compartilhado, aguarda o ALB
+interno ficar ativo e com targets saudaveis, e so entao executa o `terraform
+apply` desta stack, no mesmo run. Ele falha antes do apply se as tres regras
+de health por header ainda nao existirem no listener do ALB.
 
 ## Dependencias
 
@@ -207,13 +207,13 @@ Ingress compartilhado atualizado (health por header)
 ALB interno oficina + Listener HTTP 80 + targets saudaveis
 ```
 
-## Limitacoes e dependencias academicas
+## Limitacoes e dependencias conhecidas
 
 - Sem dominio customizado, sem ACM, sem Route 53, sem WAF, sem API Key/Usage Plan.
 - Sem TLS interno (HTTP dentro da VPC entre VPC Link e ALB).
 - Cache do Authorizer desabilitado (TTL 0) nesta etapa.
 - Um unico ambiente AWS (sem dev/hml/prod).
-- Sem pipeline de destroy; a limpeza ocorre pelo reset do AWS Academy.
+- Sem pipeline de destroy neste repositorio.
 - **Bloqueante para E2E funcional**: em producao os microservicos usam
   `services.AddAuthentication()` sem esquema JWT e nao consomem `x-oficina-*`. O
   Authorizer e os headers confiaveis ja sao aplicados aqui, mas a autorizacao

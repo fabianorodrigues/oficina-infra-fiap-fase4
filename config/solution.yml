@@ -1,0 +1,75 @@
+# Contrato humano da solucao Oficina: nomes estaveis usados na documentacao e
+# nas validacoes locais. Nao contem segredos, ARNs, URLs reais ou IDs gerados
+# pela AWS. Nenhuma aplicacao le este arquivo em runtime; ele existe para
+# orientar quem le o codigo e os READMEs.
+#
+# O contrato de maquina consumido pelo Terraform (paths SSM de inputs, outputs
+# e secrets) fica em config/resource-contract.yml, no mesmo repositorio.
+
+solution:
+  name: oficina
+  cluster: oficina
+  namespace: oficina
+
+repositories:
+  cadastro:
+    repo: oficina-cadastro-fiap-fase4
+    service: oficina-cadastro
+    database: OficinaCadastroDb
+  estoque:
+    repo: oficina-estoque-fiap-fase4
+    service: oficina-estoque
+    database: OficinaEstoqueDb
+  ordens:
+    repo: oficina-ordens-servico-fiap-fase4
+    service: oficina-ordens-servico
+    database: OficinaOrdensServicoDb
+  auth:
+    repo: oficina-auth-lambda-fiap-fase4
+    functions:
+      - oficina-auth-cpf
+      - oficina-authorizer
+  infraDb:
+    repo: oficina-infra-db-fiap-fase4
+  infra:
+    repo: oficina-infra-fiap-fase4
+
+queues:
+  estoqueComandos: oficina-estoque-comandos.fifo
+  estoqueComandosDlq: oficina-estoque-comandos-dlq.fifo
+  ordensEventos: oficina-ordens-eventos.fifo
+  ordensEventosDlq: oficina-ordens-eventos-dlq.fifo
+
+entrypoint:
+  apiGateway: oficina-api
+  loadBalancer: oficina
+  ingress: oficina
+  vpcLink: oficina
+
+database:
+  engine: SQL Server (RDS)
+  logicalDatabases:
+    - OficinaCadastroDb
+    - OficinaEstoqueDb
+    - OficinaOrdensServicoDb
+
+terraformStates:
+  infraDb: oficina/infra-db/terraform.tfstate
+  platform: oficina/platform/terraform.tfstate
+  entrypoint: oficina/entrypoint/terraform.tfstate
+  auth: oficina/auth/terraform.tfstate
+
+provisioningOrder:
+  - Backend Bootstrap
+  - Infra DB Deploy
+  - Observability Secret Sync
+  - Platform Deploy
+  - Database Secrets Sync
+  - Database Bootstrap
+  - Auth Secret Sync
+  - Auth Deploy
+  - Cadastro Deploy
+  - Estoque Deploy
+  - Ordens Deploy
+  - Entrypoint Deploy
+  - E2E Validate

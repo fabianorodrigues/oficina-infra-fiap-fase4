@@ -6,17 +6,11 @@ locals {
     ordens_eventos_dlq   = aws_sqs_queue.dlq["ordens_eventos"].arn
   }
 
-  existing_secret_arn_by_name = merge(
+  secret_arn_by_name = merge(
     { for key, secret in data.aws_secretsmanager_secret.sql : local.secret_names[key] => secret.arn },
     { (local.official.observability.newRelicSecretName) = aws_secretsmanager_secret.new_relic.arn },
     { (local.resource_contract.inputs.rdsMasterSecretArn) = data.aws_ssm_parameter.rds_master_secret_arn.value }
   )
-
-  future_secret_arn_by_name = {
-    (local.secret_names.mercado_pago) = "arn:${data.aws_partition.current.partition}:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${local.secret_names.mercado_pago}-*"
-  }
-
-  secret_arn_by_name = merge(local.existing_secret_arn_by_name, local.future_secret_arn_by_name)
 }
 
 data "aws_iam_policy_document" "workload_pod_identity_assume" {

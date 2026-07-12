@@ -7,9 +7,20 @@ on:
     paths:
       - 'config/**'
       - 'terraform/platform/**'
+      - 'terraform/entrypoint/**'
       - 'deploy/platform/**'
+      - 'deploy/k8s/ingress/**'
       - 'scripts/validate-platform*.ps1'
+      - 'scripts/validate-entrypoint*.ps1'
+      - 'scripts/validate-route-contract.ps1'
+      - 'scripts/validate-ingress*.ps1'
+      - 'scripts/render-ingress.ps1'
+      - 'scripts/smoke-test-api.ps1'
+      - 'scripts/smoke-test-internal-alb.ps1'
+      - 'scripts/sync-newrelic-secret.ps1'
       - '.github/workflows/platform-*.yml'
+      - '.github/workflows/entrypoint-*.yml'
+      - '.github/workflows/observability-*.yml'
       - '.tflint.hcl'
 
 permissions:
@@ -31,48 +42,136 @@ jobs:
       - name: Setup TFLint
         uses: terraform-linters/setup-tflint@v4
 
-      - name: Validate versioned config
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.30.5
+
+      # Disposable local cluster (not EKS, no AWS) so the client dry-run can
+      # resolve built-in schemas offline. --dry-run=client creates nothing.
+      - name: Setup throwaway kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: platform-ci
+
+      - name: Validate JSON is well formed
+        run: |
+          jq empty config/entrypoint.json
+          jq empty config/ingress-routes.json
+
+      - name: Validate platform configuration
         shell: pwsh
         run: ./scripts/validate-platform-config.ps1
 
-      - name: PowerShell AST
+      - name: Validate entrypoint configuration
+        shell: pwsh
+        run: ./scripts/validate-entrypoint-config.ps1
+
+      - name: Validate route contract
+        shell: pwsh
+        run: ./scripts/validate-route-contract.ps1
+
+      - name: Validate ingress configuration
+        shell: pwsh
+        run: ./scripts/validate-ingress-config.ps1
+
+      - name: Validate SSM contract outputs
         shell: pwsh
         run: |
-          foreach ($file in @('scripts/validate-platform-config.ps1', 'scripts/validate-platform.ps1')) {
-            $tokens = $null
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors) | Out-Null
-            if ($errors.Count -gt 0) {
-              $errors | Format-List | Out-String | Write-Error
-            }
+          $contract = Get-Content config/resource-contract.yml -Raw
+          $expected = @(
+            'apiId: /oficina/infra/api/id',
+            'apiUrl: /oficina/infra/api/url',
+            'apiExecutionArn: /oficina/infra/api/execution-arn',
+            'apiStage: /oficina/infra/api/stage',
+            'vpcLinkId: /oficina/infra/api/vpc-link-id'
+          )
+          foreach ($e in $expected) {
+            if ($contract -notmatch [regex]::Escape($e)) { throw "resource-contract.yml is missing output '$e'." }
           }
+          Write-Host 'SSM contract outputs are present.'
 
-      - name: Terraform fmt
+      - name: Render ingress with synthetic subnets
+        shell: pwsh
+        run: |
+          ./scripts/render-ingress.ps1 `
+            -OutputDirectory "$env:RUNNER_TEMP/ingress" `
+            -PrivateSubnet1 'subnet-00000000000000001' `
+            -PrivateSubnet2 'subnet-00000000000000002'
+
+      - name: Confirm no placeholders remain
+        shell: pwsh
+        run: |
+          $rendered = Get-Content "$env:RUNNER_TEMP/ingress/ingress.rendered.yaml" -Raw
+          if ($rendered -match '__[A-Z0-9_]+__') { throw 'Rendered manifest still contains placeholders.' }
+          Write-Host 'No placeholders in rendered manifest.'
+
+      - name: Kubeconform rendered ingress
+        run: |
+          set -euo pipefail
+          version=v0.6.7
+          curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
+          tar -xf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -summary "$RUNNER_TEMP/ingress/ingress.rendered.yaml"
+
+      - name: kubectl apply dry-run (client)
+        run: kubectl apply --dry-run=client -f "$RUNNER_TEMP/ingress/ingress.rendered.yaml"
+
+      - name: Terraform fmt (platform)
         working-directory: terraform/platform
         run: terraform fmt -check -recursive
 
-      - name: Terraform init
+      - name: Terraform init (platform)
         working-directory: terraform/platform
         run: terraform init -backend=false
 
-      - name: Terraform validate
+      - name: Terraform validate (platform)
         working-directory: terraform/platform
         run: terraform validate
 
-      - name: Terraform providers
+      - name: Terraform providers (platform)
         working-directory: terraform/platform
         run: terraform providers
 
-      - name: TFLint
+      - name: TFLint (platform)
         working-directory: terraform/platform
         run: |
           tflint --init
           tflint --recursive
 
-      - name: Checkov
+      - name: Checkov (platform)
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: terraform/platform
+          quiet: true
+          framework: terraform
+
+      - name: Terraform fmt (entrypoint)
+        working-directory: terraform/entrypoint
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init (entrypoint)
+        working-directory: terraform/entrypoint
+        run: terraform init -backend=false
+
+      - name: Terraform validate (entrypoint)
+        working-directory: terraform/entrypoint
+        run: terraform validate
+
+      - name: Terraform providers (entrypoint)
+        working-directory: terraform/entrypoint
+        run: terraform providers
+
+      - name: TFLint (entrypoint)
+        working-directory: terraform/entrypoint
+        run: |
+          tflint --init
+          tflint --recursive
+
+      - name: Checkov (entrypoint)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform/entrypoint
           quiet: true
           framework: terraform
 
@@ -96,10 +195,46 @@ jobs:
           helm lint newrelic/nri-bundle -f deploy/platform/newrelic/values.yaml --set global.cluster=oficina
           helm template newrelic-bundle newrelic/nri-bundle -n newrelic -f deploy/platform/newrelic/values.yaml --set global.cluster=oficina > "$RUNNER_TEMP/newrelic.yaml"
 
+      - name: PowerShell AST
+        shell: pwsh
+        run: |
+          $scripts = @(
+            'scripts/validate-platform-config.ps1',
+            'scripts/validate-platform.ps1',
+            'scripts/validate-entrypoint-config.ps1',
+            'scripts/validate-route-contract.ps1',
+            'scripts/validate-entrypoint.ps1',
+            'scripts/smoke-test-api.ps1',
+            'scripts/validate-ingress-config.ps1',
+            'scripts/render-ingress.ps1',
+            'scripts/validate-ingress.ps1',
+            'scripts/smoke-test-internal-alb.ps1',
+            'scripts/sync-newrelic-secret.ps1'
+          )
+          foreach ($file in $scripts) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | Format-List | Out-String | Write-Error
+              throw "PowerShell parse errors in $file."
+            }
+          }
+          Write-Host 'PowerShell AST parse succeeded.'
+
       - name: Actionlint
         uses: raven-actions/actionlint@v2
 
-      - name: Static safety searches
+      - name: Forbidden route keys
+        run: |
+          set -euo pipefail
+          bad=$(jq -r '.routes[].routeKey' config/entrypoint.json | grep -E '/(ready|api/internal|api/dev)(/|$)' || true)
+          if [ -n "$bad" ]; then echo "Forbidden route keys exposed:"; echo "$bad"; exit 1; fi
+          catchall=$(jq -r '.routes[].routeKey' config/entrypoint.json | grep -E '^(\$default|ANY /\{proxy\+\}|ANY /api/\{proxy\+\}|ANY /)$' || true)
+          if [ -n "$catchall" ]; then echo "Catch-all route keys present:"; echo "$catchall"; exit 1; fi
+          echo 'No forbidden or catch-all route keys.'
+
+      - name: Static safety searches (platform)
         shell: pwsh
         run: |
           $patterns = @(
@@ -128,11 +263,110 @@ jobs:
             }
           }
 
+      - name: Static safety searches (entrypoint)
+        shell: pwsh
+        run: |
+          $tfAndFlow = @('terraform/entrypoint/*', '.github/workflows/entrypoint-*.yml', '.github/workflows/platform-*.yml')
+          $allEntrypoint = @('config/entrypoint.json', 'terraform/entrypoint/*', 'scripts/validate-entrypoint*.ps1', 'scripts/validate-route-contract.ps1', 'scripts/smoke-test-api.ps1', '.github/workflows/entrypoint-*.yml', '.github/workflows/platform-*.yml', 'terraform/entrypoint/README.md')
+
+          function Assert-NoMatch {
+            param([string[]]$Files, [string]$Pattern, [string]$Label)
+            $found = Select-String -Path $Files -Pattern $Pattern -SimpleMatch -ErrorAction SilentlyContinue
+            if ($found) {
+              $found | Format-Table Path, LineNumber, Line -AutoSize | Out-String | Write-Host
+              throw "Forbidden pattern found ($Label)."
+            }
+          }
+
+          # No destroy / delete of the entrypoint.
+          Assert-NoMatch $allEntrypoint ('terraform ' + 'destroy') 'tf-destroy'
+          Assert-NoMatch $allEntrypoint ('delete-' + 'api') 'delete-api'
+          Assert-NoMatch $allEntrypoint ('delete-' + 'vpc-link') 'delete-vpc-link'
+
+          # No public ALB / open CIDR anywhere in the stack.
+          Assert-NoMatch $tfAndFlow ('internet' + '-facing') 'internet-facing'
+          Assert-NoMatch $tfAndFlow '0.0.0.0/0' 'open-cidr'
+
+          # No unaliased Lambda, no secret reads, no cross-stack state.
+          Assert-NoMatch $tfAndFlow ('function:$' + 'LATEST') 'lambda-latest'
+          Assert-NoMatch $tfAndFlow ('get-secret' + '-value') 'get-secret-value'
+          Assert-NoMatch $allEntrypoint ('JWT_SIGNING' + '_KEY') 'jwt-key'
+          Assert-NoMatch $tfAndFlow ('Secret' + 'String') 'secretstring'
+          Assert-NoMatch $tfAndFlow ('terraform' + '_remote_state') 'remote-state'
+
+          # Authorizer hardening must not be weakened.
+          Assert-NoMatch $tfAndFlow ('authorizer_result_ttl_in_seconds = ' + '300') 'authorizer-cache'
+          Assert-NoMatch $tfAndFlow ('enable_simple_responses = ' + 'false') 'simple-responses-off'
+
+          # No legacy phase or environment suffixes.
+          Assert-NoMatch $allEntrypoint ('Fase' + '3') 'legacy-phase'
+          Assert-NoMatch $allEntrypoint ('fase' + '-3') 'legacy-phase-dash'
+
+          # Secret value assignments must never carry a value.
+          foreach ($s in @(('AWS_ACCESS_KEY_ID' + '='), ('AWS_SECRET_ACCESS_KEY' + '='), ('AWS_SESSION_TOKEN' + '='))) {
+            $m = Select-String -Path $allEntrypoint -Pattern ($s + '\S') -ErrorAction SilentlyContinue
+            if ($m) { $m | Format-Table Path, LineNumber -AutoSize | Out-String | Write-Host; throw "Secret value assignment found ($s)." }
+          }
+
+          Write-Host 'Static safety searches passed.'
+
+      - name: Static safety searches (ingress)
+        shell: pwsh
+        run: |
+          $rendered = "$env:RUNNER_TEMP/ingress/ingress.rendered.yaml"
+          $template = 'deploy/k8s/ingress/ingress.template.yaml'
+          $config = 'config/ingress-routes.json'
+          $manifestFiles = @($rendered, $config)
+          $ingressFiles = @($config, 'deploy/k8s/ingress/*', 'scripts/validate-ingress-config.ps1', 'scripts/render-ingress.ps1', 'scripts/validate-ingress.ps1', 'scripts/smoke-test-internal-alb.ps1', '.github/workflows/platform-ci.yml', '.github/workflows/entrypoint-deploy.yml', 'README.md')
+
+          function Assert-NoMatch {
+            param([string[]]$Files, [string]$Pattern, [string]$Label)
+            $found = Select-String -Path $Files -Pattern $Pattern -SimpleMatch -ErrorAction SilentlyContinue
+            if ($found) {
+              $found | Format-Table Path, LineNumber, Line -AutoSize | Out-String | Write-Host
+              throw "Forbidden pattern found ($Label)."
+            }
+          }
+
+          # Public ALB / open CIDR must never appear in manifest, template or config.
+          Assert-NoMatch @($rendered, $template, $config) ('internet' + '-facing') 'internet-facing'
+          Assert-NoMatch @($rendered, $template, $config) '0.0.0.0/0' 'open-cidr'
+
+          # No Service LoadBalancer / NodePort inside the ingress manifests.
+          Assert-NoMatch @('deploy/k8s/ingress/*', $rendered) ('type: ' + 'LoadBalancer') 'service-loadbalancer'
+          Assert-NoMatch @('deploy/k8s/ingress/*', $rendered) ('type: ' + 'NodePort') 'service-nodeport'
+
+          # Forbidden routes only checked where real paths live (manifest + config).
+          foreach ($p in @(('path: ' + '/api/internal'), ('path: ' + '/api/dev'), ('path: ' + '/ready'))) {
+            Assert-NoMatch $manifestFiles $p "route:$p"
+          }
+
+          # Catch-all / generic /api paths (anchored so /api/admin does not false-positive).
+          if (Select-String -Path $rendered -Pattern '^\s*- path: /\s*$' -ErrorAction SilentlyContinue) { throw 'Catch-all path / present.' }
+          if (Select-String -Path $rendered -Pattern '^\s*- path: /api\s*$' -ErrorAction SilentlyContinue) { throw 'Generic /api path present.' }
+
+          # Secret assignments must never carry a value.
+          foreach ($s in @(('AWS_ACCESS_KEY_ID' + '='), ('AWS_SECRET_ACCESS_KEY' + '='), ('AWS_SESSION_TOKEN' + '='))) {
+            $m = Select-String -Path $ingressFiles -Pattern ($s + '\S') -ErrorAction SilentlyContinue
+            if ($m) { $m | Format-Table Path, LineNumber -AutoSize | Out-String | Write-Host; throw "Secret value assignment found ($s)." }
+          }
+
+          # No references to the previous academic phase.
+          Assert-NoMatch $ingressFiles ('Fase' + '3') 'legacy-phase'
+          Assert-NoMatch $ingressFiles ('fase' + '-3') 'legacy-phase-dash'
+
+          # No destructive infra operations (temporary-pod cleanup is allowed).
+          Assert-NoMatch @('.github/workflows/platform-ci.yml', '.github/workflows/entrypoint-deploy.yml', 'scripts/validate-ingress.ps1', 'scripts/render-ingress.ps1', 'scripts/validate-ingress-config.ps1') ('terraform ' + 'destroy') 'tf-destroy'
+          Assert-NoMatch @('.github/workflows/platform-ci.yml', '.github/workflows/entrypoint-deploy.yml', 'scripts/validate-ingress.ps1', 'scripts/smoke-test-internal-alb.ps1') ('delete-' + 'load-balancer') 'delete-alb'
+          Assert-NoMatch @('.github/workflows/platform-ci.yml', '.github/workflows/entrypoint-deploy.yml', 'scripts/validate-ingress.ps1', 'scripts/smoke-test-internal-alb.ps1') ('kubectl delete ' + 'ingress') 'delete-ingress'
+
+          Write-Host 'Static safety searches passed.'
+
       - name: Summary
         run: |
           {
             echo '### Platform CI'
             echo
-            echo 'Validacao estatica concluida.'
-            echo 'O Terraform Plan real sera executado pelo Platform Deploy.'
+            echo 'Validacao estatica concluida (platform, entrypoint e ingress). Nenhum recurso AWS foi acessado.'
+            echo 'Recursos reais serao criados apenas pelo Platform Deploy e pelo Entrypoint Deploy apos merge na main.'
           } >> "$GITHUB_STEP_SUMMARY"

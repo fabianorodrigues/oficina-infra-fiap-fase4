@@ -50,8 +50,8 @@ de autorizacao (`Authorize`/`AllowAnonymous`). O Security Group do ALB e gerenci
 automaticamente pelo AWS Load Balancer Controller; o endurecimento para permitir
 somente o Security Group do VPC Link podera ser feito na etapa de Entrypoint.
 
-Para o projeto academico, `API Gateway -> VPC Link -> ALB` pode usar HTTP dentro da
-VPC. Ambientes corporativos devem avaliar TLS interno.
+Nesta solução, `API Gateway -> VPC Link -> ALB` usa HTTP dentro da VPC. Ambientes
+corporativos devem avaliar TLS interno.
 
 ## Rotas expostas
 
@@ -146,29 +146,24 @@ No modo local, subnets sinteticas sao aceitas. O deploy real usa as duas subnets
 privadas lidas do SSM. O renderer e deterministico e falha se algum placeholder
 permanecer.
 
-## SSM
+## Descoberta pela stack Entrypoint
 
-Apos o ALB ficar ativo e validado, o workflow publica (idempotente, `String`,
-`--overwrite`):
+O ALB e o Listener HTTP 80 nao sao publicados no SSM. A stack Terraform de
+Entrypoint (`terraform/entrypoint/`) os descobre por nome (`data "aws_lb"` +
+`data "aws_lb_listener"`) no mesmo workflow que aplica este Ingress, logo apos
+o ALB ficar ativo. Nenhum outro repositorio precisa copiar esses valores
+manualmente.
 
-```text
-/oficina/infra/alb/arn
-/oficina/infra/alb/listener-arn
-/oficina/infra/alb/dns
-```
-
-Esses paths ja constam em `config/resource-contract.yml`. A stack Entrypoint os
-consumira. Nenhum outro repositorio precisa copiar esses valores manualmente.
-
-## Execucao futura
+## Execucao
 
 ```text
-GitHub -> Actions -> Ingress Deploy -> Run workflow -> Branch main -> confirmation DEPLOY
+GitHub -> Actions -> Entrypoint Deploy -> Run workflow -> Branch main -> confirmation APPLY
 ```
 
-O deploy so roda em `refs/heads/main` com `confirmation = DEPLOY`. Nao ha pipeline
-de destroy nem script de exclusao do ALB. Rollback ocorre corrigindo o manifest em
-nova branch, abrindo PR, fazendo merge na `main` e reexecutando `Ingress Deploy`.
+O workflow `Entrypoint Deploy` aplica este Ingress e, na sequencia, a stack
+Terraform de Entrypoint, no mesmo run. So executa em `refs/heads/main` com
+`confirmation = APPLY`. Nao ha pipeline de destroy nem script de exclusao do
+ALB; correcoes ocorrem por PR normal seguido de novo `Entrypoint Deploy`.
 
 ## Dependencias
 

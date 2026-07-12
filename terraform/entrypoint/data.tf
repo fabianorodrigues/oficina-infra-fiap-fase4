@@ -17,19 +17,16 @@ data "aws_ssm_parameter" "private_subnet_2" {
   name = local.entrypoint.vpcLink.privateSubnet2Parameter
 }
 
-# --- Internal ALB (Ingress stack) resolved from SSM -------------------------
-data "aws_ssm_parameter" "alb_arn" {
-  name = local.entrypoint.vpcLink.albArnParameter
-}
-
-data "aws_ssm_parameter" "alb_listener_arn" {
-  name = local.entrypoint.vpcLink.albListenerArnParameter
-}
-
-# The listener ARN is used directly as the private integration URI. The ALB
-# object is read only to discover its security groups for the VPC Link rule.
+# --- Internal ALB (Ingress, applied earlier in the same Entrypoint Deploy run) ----
+# Discovered by name and port instead of an SSM handoff, since both the Ingress
+# apply and this Terraform run happen in the same workflow.
 data "aws_lb" "internal" {
-  arn = data.aws_ssm_parameter.alb_arn.value
+  name = local.entrypoint.vpcLink.albName
+}
+
+data "aws_lb_listener" "internal" {
+  load_balancer_arn = data.aws_lb.internal.arn
+  port              = 80
 }
 
 data "aws_security_group" "alb" {

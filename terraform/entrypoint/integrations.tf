@@ -7,7 +7,7 @@ resource "aws_apigatewayv2_integration" "alb_protected" {
   integration_method     = "ANY"
   connection_type        = "VPC_LINK"
   connection_id          = aws_apigatewayv2_vpc_link.this.id
-  integration_uri        = data.aws_ssm_parameter.alb_listener_arn.value
+  integration_uri        = data.aws_lb_listener.internal.arn
   payload_format_version = local.entrypoint.integration.albPayloadFormatVersion
   timeout_milliseconds   = local.integration_timeout
   request_parameters     = local.protected_request_parameters
@@ -21,7 +21,7 @@ resource "aws_apigatewayv2_integration" "alb_public" {
   integration_method     = "ANY"
   connection_type        = "VPC_LINK"
   connection_id          = aws_apigatewayv2_vpc_link.this.id
-  integration_uri        = data.aws_ssm_parameter.alb_listener_arn.value
+  integration_uri        = data.aws_lb_listener.internal.arn
   payload_format_version = local.entrypoint.integration.albPayloadFormatVersion
   timeout_milliseconds   = local.integration_timeout
   request_parameters     = local.public_request_parameters
@@ -37,7 +37,7 @@ resource "aws_apigatewayv2_integration" "health" {
   integration_method     = "ANY"
   connection_type        = "VPC_LINK"
   connection_id          = aws_apigatewayv2_vpc_link.this.id
-  integration_uri        = data.aws_ssm_parameter.alb_listener_arn.value
+  integration_uri        = data.aws_lb_listener.internal.arn
   payload_format_version = local.entrypoint.integration.albPayloadFormatVersion
   timeout_milliseconds   = local.integration_timeout
 

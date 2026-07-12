@@ -1,6 +1,5 @@
 project:
   name: oficina
-  academicProject: fiap-fase4
 
 cluster:
   name: oficina

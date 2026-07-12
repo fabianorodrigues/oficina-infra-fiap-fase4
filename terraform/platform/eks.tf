@@ -18,7 +18,7 @@ resource "aws_iam_role_policy_attachment" "eks_cluster" {
   policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/AmazonEKSClusterPolicy"
 }
 
-# checkov:skip=CKV_AWS_38:Public EKS API endpoint is required for GitHub-hosted runners in this academic setup; access remains IAM/Kubernetes-authorized.
+# checkov:skip=CKV_AWS_38:Public EKS API endpoint is required for GitHub-hosted runners; access remains IAM/Kubernetes-authorized.
 # checkov:skip=CKV_AWS_39:Private endpoint is enabled; public endpoint is retained for GitHub-hosted runner operations.
 resource "aws_eks_cluster" "this" {
   name     = local.cluster_name

@@ -3,7 +3,6 @@ locals {
   resource_contract = yamldecode(file("${path.module}/../../config/resource-contract.yml"))
 
   project_name     = local.official.project.name
-  academic_project = local.official.project.academicProject
   cluster_name     = local.official.cluster.name
   namespace        = local.official.cluster.namespace
   workload_mode    = local.official.workloadIdentity.mode
@@ -34,7 +33,6 @@ locals {
     ordens_runtime    = local.resource_contract.secrets.ordensRuntimeDb
     ordens_migrator   = local.resource_contract.secrets.ordensMigrationDb
     auth_database     = local.resource_contract.secrets.authDatabase
-    mercado_pago      = local.resource_contract.secrets.mercadoPago
     new_relic         = local.resource_contract.secrets.newRelic
   }
 
@@ -60,7 +58,7 @@ locals {
       sqs_send     = []
     }
     ordens-runtime = {
-      secret_names = [local.secret_names.ordens_runtime, local.secret_names.mercado_pago]
+      secret_names = [local.secret_names.ordens_runtime]
       sqs_receive  = ["ordens_eventos"]
       sqs_send     = ["estoque_comandos", "ordens_eventos_dlq"]
     }
@@ -93,9 +91,8 @@ locals {
   ])
 
   common_tags = {
-    Project         = local.project_name
-    AcademicProject = local.academic_project
-    ManagedBy       = "terraform"
-    Repository      = "oficina-infra-fiap-fase4"
+    Project    = local.project_name
+    ManagedBy  = "terraform"
+    Repository = "oficina-infra-fiap-fase4"
   }
 }

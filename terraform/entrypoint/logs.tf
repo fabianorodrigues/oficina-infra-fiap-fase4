@@ -1,6 +1,6 @@
 resource "aws_cloudwatch_log_group" "api" {
-  # checkov:skip=CKV_AWS_158:AWS Academy provisions no customer-managed KMS key; the access log group uses default CloudWatch encryption. Access logs are sanitized and contain no secrets.
-  # checkov:skip=CKV_AWS_338:Academic retention is 14 days per config/entrypoint.json; multi-year retention is out of scope for this lab.
+  # checkov:skip=CKV_AWS_158:No customer-managed KMS key is provisioned; the access log group uses default CloudWatch encryption. Access logs are sanitized and contain no secrets.
+  # checkov:skip=CKV_AWS_338:Retention is 14 days per config/entrypoint.json; multi-year retention is out of scope for this solution.
   name              = local.entrypoint.logging.logGroupName
   retention_in_days = local.entrypoint.logging.retentionInDays
 

@@ -75,10 +75,5 @@
         "/api/relatorios"
       ]
     }
-  ],
-  "ssmOutputs": {
-    "loadBalancerArn": "/oficina/infra/alb/arn",
-    "listenerArn": "/oficina/infra/alb/listener-arn",
-    "dnsName": "/oficina/infra/alb/dns"
-  }
+  ]
 }

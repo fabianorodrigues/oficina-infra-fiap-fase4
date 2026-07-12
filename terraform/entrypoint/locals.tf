@@ -4,8 +4,7 @@ locals {
   entrypoint = jsondecode(file("${path.module}/../../config/entrypoint.json"))
   official   = yamldecode(file("${path.module}/../../config/official.yml"))
 
-  project_name     = local.official.project.name
-  academic_project = local.official.project.academicProject
+  project_name = local.official.project.name
 
   api_name      = local.entrypoint.api.name
   vpc_link_name = local.entrypoint.vpcLink.name
@@ -62,10 +61,9 @@ locals {
   )
 
   common_tags = {
-    Project         = local.project_name
-    AcademicProject = local.academic_project
-    ManagedBy       = "terraform"
-    Repository      = "oficina-infra-fiap-fase4"
-    Component       = "entrypoint"
+    Project    = local.project_name
+    ManagedBy  = "terraform"
+    Repository = "oficina-infra-fiap-fase4"
+    Component  = "entrypoint"
   }
 }

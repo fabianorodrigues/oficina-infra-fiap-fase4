@@ -43,6 +43,6 @@ Nao execute `apply` localmente. A criacao oficial sera feita apenas pelo workflo
 
 ## Identidade
 
-O modo padrao e `pod-identity`. Para fallback academico, altere `workloadIdentity.mode` em `config/official.yml` para `irsa`. A stack nao habilita os dois modos para a mesma ServiceAccount.
+O modo padrao e `pod-identity`. Para usar o fallback, altere `workloadIdentity.mode` em `config/official.yml` para `irsa`. A stack nao habilita os dois modos para a mesma ServiceAccount.
 
-Se Pod Identity e IRSA forem bloqueados no laboratorio, a Node Role compartilhada pode ser usada apenas como fallback manual temporario e documentado fora desta stack.
+Se Pod Identity e IRSA estiverem indisponiveis, a Node Role compartilhada pode ser usada apenas como fallback manual temporario e documentado fora desta stack.

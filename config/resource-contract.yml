@@ -27,10 +27,6 @@ outputs:
   ordensEventDlqUrl: /oficina/infra/sqs/ordens-eventos-dlq/url
   ordensEventDlqArn: /oficina/infra/sqs/ordens-eventos-dlq/arn
 
-  albArn: /oficina/infra/alb/arn
-  albListenerArn: /oficina/infra/alb/listener-arn
-  albDnsName: /oficina/infra/alb/dns
-
   apiId: /oficina/infra/api/id
   apiUrl: /oficina/infra/api/url
   apiExecutionArn: /oficina/infra/api/execution-arn
@@ -46,5 +42,4 @@ secrets:
   ordensMigrationDb: /oficina/ordens/migration-db
   authDatabase: /oficina/auth/database
   authJwt: /oficina/auth/jwt
-  mercadoPago: /oficina/payments/mercado-pago
   newRelic: /oficina/observability/new-relic

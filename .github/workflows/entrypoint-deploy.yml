@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: 'Type APPLY to create the API Gateway, VPC Link and integrations from main.'
+        description: 'Type APPLY to create the internal ALB, API Gateway, VPC Link and integrations from main.'
         required: true
         type: string
 
@@ -19,12 +19,16 @@ jobs:
   deploy:
     name: Manual entrypoint deploy
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
       TF_STATE_REGION: ${{ vars.TF_STATE_REGION }}
       TF_STATE_KEY: ${{ vars.TF_STATE_KEY_ENTRYPOINT }}
+      CLUSTER_NAME: oficina
+      NAMESPACE: oficina
+      INGRESS_NAME: oficina
+      ALB_NAME: oficina
       API_NAME: oficina-api
       VPC_LINK_NAME: oficina
       HEALTH_HEADER: x-oficina-health-target
@@ -32,14 +36,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2/3. Guardrails: only main, only the exact confirmation.
       - name: Validate branch
         run: test "${GITHUB_REF}" = "refs/heads/main"
 
       - name: Validate confirmation
         run: test "${{ inputs.confirmation }}" = "APPLY"
 
-      # 4. Repository Variables must be configured.
       - name: Validate repository variables
         run: |
           set -euo pipefail
@@ -49,6 +51,11 @@ jobs:
           test "${TF_STATE_KEY}" = "oficina/entrypoint/terraform.tfstate"
           echo 'Repository variables present.'
 
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.30.5
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
@@ -57,7 +64,10 @@ jobs:
       - name: Setup TFLint
         uses: terraform-linters/setup-tflint@v4
 
-      # 5/6. Versioned configuration must be valid before touching AWS.
+      - name: Validate ingress configuration
+        shell: pwsh
+        run: ./scripts/validate-ingress-config.ps1
+
       - name: Validate entrypoint configuration
         shell: pwsh
         run: ./scripts/validate-entrypoint-config.ps1
@@ -66,7 +76,6 @@ jobs:
         shell: pwsh
         run: ./scripts/validate-route-contract.ps1
 
-      # 7/8. Credentials and identity.
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -78,45 +87,175 @@ jobs:
       - name: Validate STS
         run: aws sts get-caller-identity
 
-      # 9. Terraform backend bucket must exist and be reachable.
-      - name: Validate Terraform backend
-        run: aws s3api head-bucket --bucket "${TF_STATE_BUCKET}"
+      # --- Phase 1: Ingress (internal ALB) ---------------------------------
 
-      # 10. VPC and two private subnets from SSM.
-      - name: Validate VPC and private subnets
+      - name: Resolve infra parameters from SSM
         run: |
           set -euo pipefail
+          cluster=$(aws ssm get-parameter --name /oficina/infra/cluster/name --query Parameter.Value --output text)
           vpc=$(aws ssm get-parameter --name /oficina/infra/vpc/id --query Parameter.Value --output text)
           subnet1=$(aws ssm get-parameter --name /oficina/infra/subnets/private/1 --query Parameter.Value --output text)
           subnet2=$(aws ssm get-parameter --name /oficina/infra/subnets/private/2 --query Parameter.Value --output text)
+          test "$cluster" = "${CLUSTER_NAME}"
           test "$subnet1" != "$subnet2"
           for s in "$subnet1" "$subnet2"; do
             svpc=$(aws ec2 describe-subnets --subnet-ids "$s" --query 'Subnets[0].VpcId' --output text)
             test "$svpc" = "$vpc"
-            public=$(aws ec2 describe-subnets --subnet-ids "$s" --query 'Subnets[0].MapPublicIpOnLaunch' --output text)
-            test "$public" = "False"
           done
-          echo "Private subnets validated in VPC $vpc."
+          {
+            echo "SUBNET1=$subnet1"
+            echo "SUBNET2=$subnet2"
+          } >> "$GITHUB_ENV"
+          echo "Resolved private subnets in VPC $vpc."
 
-      # 11/12/13/14. Internal ALB with an HTTP 80 listener.
-      - name: Validate internal ALB and listener
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
+
+      - name: Validate cluster and nodes
         run: |
           set -euo pipefail
-          alb_arn=$(aws ssm get-parameter --name /oficina/infra/alb/arn --query Parameter.Value --output text)
-          listener_arn=$(aws ssm get-parameter --name /oficina/infra/alb/listener-arn --query Parameter.Value --output text)
-          scheme=$(aws elbv2 describe-load-balancers --load-balancer-arns "$alb_arn" --query 'LoadBalancers[0].Scheme' --output text)
-          test "$scheme" = "internal"
-          proto=$(aws elbv2 describe-listeners --listener-arns "$listener_arn" --query 'Listeners[0].Protocol' --output text)
-          port=$(aws elbv2 describe-listeners --listener-arns "$listener_arn" --query 'Listeners[0].Port' --output text)
-          test "$proto" = "HTTP"
-          test "$port" = "80"
-          {
-            echo "ALB_ARN=$alb_arn"
-            echo "LISTENER_ARN=$listener_arn"
-          } >> "$GITHUB_ENV"
-          echo "Internal ALB and HTTP 80 listener validated."
+          aws eks wait cluster-active --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
+          kubectl wait --for=condition=Ready nodes --all --timeout=10m
 
-      # 15/16. Auth Lambdas and live aliases.
+      - name: Validate namespace
+        run: kubectl get namespace "${NAMESPACE}"
+
+      - name: Validate AWS Load Balancer Controller
+        run: |
+          set -euo pipefail
+          kubectl -n kube-system rollout status deployment/aws-load-balancer-controller --timeout=180s
+          available=$(kubectl -n kube-system get deployment aws-load-balancer-controller -o jsonpath='{.status.availableReplicas}')
+          test "${available:-0}" -ge 1
+          restarts=$(kubectl -n kube-system get pods -l app.kubernetes.io/name=aws-load-balancer-controller -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}')
+          echo "Controller restart counts: ${restarts:-0}"
+          kubectl get validatingwebhookconfigurations aws-load-balancer-webhook -o name
+
+      # IngressClass alb is owned by the Platform; this repo only references it.
+      - name: Validate IngressClass ownership
+        run: |
+          set -euo pipefail
+          if [ -f deploy/k8s/ingress/ingress-class.yaml ]; then
+            echo "IngressClass file present in this repo; applying it (repo ownership)."
+            kubectl apply -f deploy/k8s/ingress/ingress-class.yaml
+          else
+            echo "IngressClass alb is owned by the Platform; validating it exists."
+            kubectl get ingressclass alb -o name
+          fi
+
+      - name: Validate backend Services and EndpointSlices
+        run: |
+          set -euo pipefail
+          jq -c '.backends[]' config/ingress-routes.json | while read -r row; do
+            name=$(echo "$row" | jq -r '.serviceName')
+            port=$(echo "$row" | jq -r '.servicePort')
+            type=$(kubectl get svc "$name" -n "${NAMESPACE}" -o jsonpath='{.spec.type}')
+            test "$type" = "ClusterIP"
+            svcport=$(kubectl get svc "$name" -n "${NAMESPACE}" -o jsonpath='{.spec.ports[0].port}')
+            test "$svcport" = "$port"
+            kubectl get svc "$name" -n "${NAMESPACE}" -o jsonpath='{.spec.selector}' | grep -q .
+            ready=$(kubectl get endpointslices -n "${NAMESPACE}" -l "kubernetes.io/service-name=$name" -o jsonpath='{.items[*].endpoints[*].conditions.ready}')
+            echo "$ready" | grep -q true
+            echo "Service $name OK (ClusterIP, port $port, ready endpoints present)."
+          done
+
+      # Internal /health of the three backends (fail before applying the Ingress).
+      - name: Probe backend health internally
+        shell: pwsh
+        run: ./scripts/smoke-test-internal-alb.ps1 -Mode port-forward
+
+      - name: Render ingress manifest
+        shell: pwsh
+        run: |
+          ./scripts/render-ingress.ps1 `
+            -OutputDirectory "$env:RUNNER_TEMP/ingress" `
+            -PrivateSubnet1 "$env:SUBNET1" `
+            -PrivateSubnet2 "$env:SUBNET2"
+
+      - name: Kubeconform rendered manifest
+        run: |
+          set -euo pipefail
+          version=v0.6.7
+          curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${version}/kubeconform-linux-amd64.tar.gz"
+          tar -xf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -summary "$RUNNER_TEMP/ingress/ingress.rendered.yaml"
+
+      - name: Apply Ingress
+        run: kubectl apply -f "$RUNNER_TEMP/ingress/ingress.rendered.yaml"
+
+      # Wait (bounded) for the Ingress address, the ALB to become active, the
+      # listener/target groups and healthy targets. Captures the ALB and
+      # listener ARNs for the Entrypoint phase below; no SSM handoff needed
+      # since both phases run in this same workflow.
+      - name: Wait for internal ALB to become active
+        run: |
+          set -euo pipefail
+          echo "Waiting for Ingress status address..."
+          for _ in $(seq 1 60); do
+            addr=$(kubectl get ingress "${INGRESS_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || true)
+            if [ -n "$addr" ]; then echo "Ingress address: $addr"; break; fi
+            sleep 30
+          done
+          test -n "${addr:-}"
+
+          echo "Waiting for ALB ${ALB_NAME} to become active (timeout 30m)..."
+          deadline=$((SECONDS + 1800))
+          state="none"
+          while [ $SECONDS -lt $deadline ]; do
+            state=$(aws elbv2 describe-load-balancers --names "${ALB_NAME}" --query 'LoadBalancers[0].State.Code' --output text 2>/dev/null || echo "none")
+            echo "ALB state: $state"
+            if [ "$state" = "active" ]; then break; fi
+            sleep 30
+          done
+          test "$state" = "active"
+
+          lb_arn=$(aws elbv2 describe-load-balancers --names "${ALB_NAME}" --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+          scheme=$(aws elbv2 describe-load-balancers --names "${ALB_NAME}" --query 'LoadBalancers[0].Scheme' --output text)
+          dns=$(aws elbv2 describe-load-balancers --names "${ALB_NAME}" --query 'LoadBalancers[0].DNSName' --output text)
+          test "$scheme" = "internal"
+          listener_arn=$(aws elbv2 describe-listeners --load-balancer-arn "$lb_arn" --query "Listeners[?to_string(Port)=='80'].ListenerArn | [0]" --output text)
+          test -n "$listener_arn" && test "$listener_arn" != "None"
+
+          echo "Waiting for target groups and healthy targets (timeout 15m)..."
+          tg_deadline=$((SECONDS + 900))
+          while [ $SECONDS -lt $tg_deadline ]; do
+            tgs=$(aws elbv2 describe-target-groups --load-balancer-arn "$lb_arn" --query 'TargetGroups[].TargetGroupArn' --output text)
+            count=$(echo "$tgs" | wc -w)
+            unhealthy=0
+            if [ "$count" -ge 3 ]; then
+              for tg in $tgs; do
+                states=$(aws elbv2 describe-target-health --target-group-arn "$tg" --query 'TargetHealthDescriptions[].TargetHealth.State' --output text)
+                if [ -z "$states" ]; then unhealthy=$((unhealthy+1)); fi
+                for st in $states; do [ "$st" != "healthy" ] && unhealthy=$((unhealthy+1)); done
+              done
+              if [ "$unhealthy" -eq 0 ]; then echo "All targets healthy across $count target groups."; break; fi
+            fi
+            echo "Target groups: $count, non-healthy targets: $unhealthy"
+            sleep 30
+          done
+          test "$count" -ge 3
+          test "$unhealthy" -eq 0
+
+          {
+            echo "ALB_ARN=$lb_arn"
+            echo "ALB_LISTENER_ARN=$listener_arn"
+            echo "ALB_DNS=$dns"
+            echo "ALB_SCHEME=$scheme"
+            echo "TARGET_GROUP_COUNT=$count"
+          } >> "$GITHUB_ENV"
+
+      - name: Smoke test internal ALB
+        shell: pwsh
+        run: ./scripts/smoke-test-internal-alb.ps1 -Mode pod -AlbDnsName "$env:ALB_DNS"
+
+      - name: Read-only ingress validation
+        shell: pwsh
+        run: ./scripts/validate-ingress.ps1 -Region "$env:AWS_REGION" -Namespace "$env:NAMESPACE" -IngressName "$env:INGRESS_NAME" -LoadBalancerName "$env:ALB_NAME"
+
+      # --- Phase 2: Entrypoint (API Gateway / VPC Link) --------------------
+
+      - name: Validate Terraform backend
+        run: aws s3api head-bucket --bucket "${TF_STATE_BUCKET}"
+
       - name: Validate Auth Lambdas and live aliases
         run: |
           set -euo pipefail
@@ -127,14 +266,23 @@ jobs:
             echo "Lambda $fn has a live alias."
           done
 
-      # 17. Ingress health header routing must already exist on the ALB listener.
-      #     Fails before Terraform apply if the three header rules are missing.
+      # Listener protocol on the ALB created in the Ingress phase above.
+      - name: Validate internal ALB listener protocol
+        run: |
+          set -euo pipefail
+          proto=$(aws elbv2 describe-listeners --listener-arns "${ALB_LISTENER_ARN}" --query 'Listeners[0].Protocol' --output text)
+          test "$proto" = "HTTP"
+          echo "Internal ALB listener protocol validated."
+
+      # Ingress health header routing must already exist on the ALB listener
+      # created above. Fails before Terraform apply if the three header rules
+      # are missing.
       - name: Validate ingress health header rules
         run: |
           set -euo pipefail
           missing=0
           for target in cadastro estoque ordens; do
-            found=$(aws elbv2 describe-rules --listener-arn "${LISTENER_ARN}" \
+            found=$(aws elbv2 describe-rules --listener-arn "${ALB_LISTENER_ARN}" \
               --query "length(Rules[?Conditions[?HttpHeaderConfig.HttpHeaderName=='${HEALTH_HEADER}' && contains(HttpHeaderConfig.Values, '${target}')]])" \
               --output text)
             if [ "${found}" -lt 1 ]; then echo "Missing health rule for target ${target}."; missing=1; fi
@@ -142,7 +290,6 @@ jobs:
           test "${missing}" -eq 0
           echo "Three ${HEALTH_HEADER} health rules present on the ALB listener."
 
-      # 18. All ALB targets healthy.
       - name: Validate healthy targets
         run: |
           set -euo pipefail
@@ -158,12 +305,10 @@ jobs:
           test "$unhealthy" -eq 0
           echo "All targets healthy across $count target groups."
 
-      # 19. Terraform fmt.
       - name: Terraform fmt
         working-directory: terraform/entrypoint
         run: terraform fmt -check -recursive
 
-      # 20. Terraform init with the remote backend.
       - name: Terraform init
         working-directory: terraform/entrypoint
         run: |
@@ -174,19 +319,16 @@ jobs:
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true"
 
-      # 21. Terraform validate.
       - name: Terraform validate
         working-directory: terraform/entrypoint
         run: terraform validate
 
-      # 22. TFLint.
       - name: TFLint
         working-directory: terraform/entrypoint
         run: |
           tflint --init
           tflint --recursive
 
-      # 23. Checkov.
       - name: Checkov
         uses: bridgecrewio/checkov-action@v12
         with:
@@ -194,12 +336,11 @@ jobs:
           quiet: true
           framework: terraform
 
-      # 24. Terraform plan to a file.
       - name: Terraform plan
         working-directory: terraform/entrypoint
         run: terraform plan -input=false -out=tfplan
 
-      # 25. Sanitized plan summary (counts and resource types only, no values).
+      # Sanitized plan summary (counts and resource types only, no values).
       - name: Publish plan summary
         working-directory: terraform/entrypoint
         run: |
@@ -220,7 +361,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           rm -f plan.json
 
-      # 26. Apply exactly the plan produced in this run.
       - name: Terraform apply
         working-directory: terraform/entrypoint
         run: terraform apply -input=false tfplan
@@ -235,7 +375,6 @@ jobs:
             echo "VPC_LINK_ID=$(terraform output -raw vpc_link_id)"
           } >> "$GITHUB_ENV"
 
-      # 27/28. Wait (bounded, 30 min) for the VPC Link to become AVAILABLE.
       - name: Wait for VPC Link AVAILABLE
         run: |
           set -euo pipefail
@@ -255,13 +394,10 @@ jobs:
             exit 1
           fi
 
-      # 29-36. Read-only validation of API, stage, routes, authorizer,
-      #        integrations, permissions, access logs and SSM outputs.
       - name: Read-only entrypoint validation
         shell: pwsh
-        run: ./scripts/validate-entrypoint.ps1 -Region "$env:AWS_REGION" -ApiName "$env:API_NAME" -VpcLinkName "$env:VPC_LINK_NAME"
+        run: ./scripts/validate-entrypoint.ps1 -Region "$env:AWS_REGION" -ApiName "$env:API_NAME" -VpcLinkName "$env:VPC_LINK_NAME" -AlbName "$env:ALB_NAME"
 
-      # 37. Smoke test the public API.
       - name: Smoke test API
         shell: pwsh
         run: ./scripts/smoke-test-api.ps1 -BaseUrl "$env:API_ENDPOINT"
@@ -270,10 +406,12 @@ jobs:
       - name: Diagnostics on failure
         if: failure()
         run: |
+          kubectl describe ingress "${INGRESS_NAME}" -n "${NAMESPACE}" || true
+          kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp | tail -n 40 || true
+          kubectl -n kube-system logs deployment/aws-load-balancer-controller --tail=80 || true
           aws apigatewayv2 get-vpc-links --query "Items[?Name=='${VPC_LINK_NAME}']" || true
           aws apigatewayv2 get-apis --query "Items[?Name=='${API_NAME}']" || true
 
-      # 39. Sanitized step summary.
       - name: Summary
         if: always()
         run: |
@@ -281,14 +419,20 @@ jobs:
             echo '### Entrypoint Deploy'
             echo
             echo "- Commit: ${GITHUB_SHA}"
+            echo "- Cluster: ${CLUSTER_NAME}"
+            echo "- Namespace: ${NAMESPACE}"
+            echo "- Ingress: ${INGRESS_NAME}"
+            echo "- IngressClass: alb"
+            echo "- ALB name: ${ALB_NAME}"
+            echo "- ALB scheme: ${ALB_SCHEME:-unknown} (internal)"
+            echo "- ALB DNS (internal): ${ALB_DNS:-unknown}"
+            echo "- Target groups: ${TARGET_GROUP_COUNT:-unknown}"
             echo "- API name: ${API_NAME}"
             echo "- API id: ${API_ID:-unknown}"
             echo "- API endpoint: ${API_ENDPOINT:-unknown}"
             echo "- Stage: \$default"
             echo "- VPC Link: ${VPC_LINK_NAME} (${VPC_LINK_ID:-unknown})"
-            echo "- ALB listener: ${LISTENER_ARN:-unknown}"
             echo "- Health header: ${HEALTH_HEADER}"
-            echo "- SSM published: /oficina/infra/api/id, url, execution-arn, stage, vpc-link-id"
             echo
             echo 'Sensitive values (credentials, tokens, JWT, CPF, payloads) are not printed.'
           } >> "$GITHUB_STEP_SUMMARY"

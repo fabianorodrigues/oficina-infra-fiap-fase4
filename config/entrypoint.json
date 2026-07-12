@@ -12,8 +12,7 @@
     "vpcIdParameter": "/oficina/infra/vpc/id",
     "privateSubnet1Parameter": "/oficina/infra/subnets/private/1",
     "privateSubnet2Parameter": "/oficina/infra/subnets/private/2",
-    "albArnParameter": "/oficina/infra/alb/arn",
-    "albListenerArnParameter": "/oficina/infra/alb/listener-arn"
+    "albName": "oficina"
   },
   "auth": {
     "authCpfAliasArnParameter": "/oficina/auth/cpf/alias-arn",
