@@ -6,6 +6,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$root = Split-Path -Parent $PSScriptRoot
+$official = Get-Content -LiteralPath (Join-Path $root 'config/official.yml') -Raw
+$enableNewRelic = $official -match '(?m)^\s*enableNewRelic:\s*true\s*$'
 
 function Invoke-ReadOnly {
     param(
@@ -54,7 +57,9 @@ foreach ($role in @('cadastro-runtime', 'cadastro-migrator', 'estoque-runtime', 
     Invoke-ReadOnly aws @('iam', 'get-role', '--role-name', "$ClusterName-$role")
 }
 
-Invoke-ReadOnly aws @('secretsmanager', 'describe-secret', '--secret-id', '/oficina/observability/new-relic', '--region', $AwsRegion)
+if ($enableNewRelic) {
+    Invoke-ReadOnly aws @('secretsmanager', 'describe-secret', '--secret-id', '/oficina/observability/new-relic', '--region', $AwsRegion)
+}
 Invoke-ReadOnly aws @('ssm', 'get-parameters-by-path', '--path', '/oficina/infra', '--recursive', '--region', $AwsRegion)
 
 Invoke-ReadOnly helm @('list', '-A')

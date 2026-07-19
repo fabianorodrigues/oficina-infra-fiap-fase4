@@ -1,6 +1,7 @@
 resource "aws_ssm_parameter" "outputs" {
   for_each = {
     (local.resource_contract.outputs.clusterName)            = aws_eks_cluster.this.name
+    (local.resource_contract.outputs.clusterNamespace)       = kubernetes_namespace.oficina.metadata[0].name
     (local.resource_contract.outputs.clusterArn)             = aws_eks_cluster.this.arn
     (local.resource_contract.outputs.clusterEndpoint)        = aws_eks_cluster.this.endpoint
     (local.resource_contract.outputs.clusterSecurityGroupId) = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id

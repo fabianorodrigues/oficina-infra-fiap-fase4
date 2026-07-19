@@ -17,27 +17,30 @@ concurrency:
 
 jobs:
   deploy:
-    name: Manual platform deploy
+    name: Deploy platform
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      TF_STATE_KEY_PLATFORM: oficina/platform/terraform.tfstate
+      TF_STATE_BUCKET_FALLBACK: ${{ vars.TF_STATE_BUCKET }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate branch
+      - name: Validate request
+        shell: pwsh
         run: |
-          test "${GITHUB_REF}" = "refs/heads/main"
-
-      - name: Validate confirmation
-        run: |
-          test "${{ inputs.confirmation }}" = "APPLY"
-
-      - name: Validate repository variables
-        run: |
-          test -n "${{ vars.AWS_REGION }}"
-          test -n "${{ vars.TF_STATE_BUCKET }}"
-          test -n "${{ vars.TF_STATE_REGION }}"
-          test "${{ vars.TF_STATE_KEY_PLATFORM }}" = "oficina/platform/terraform.tfstate"
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+            throw 'This workflow must run from main.'
+          }
+          if ('${{ inputs.confirmation }}' -cne 'APPLY') {
+            throw 'Confirmation must be APPLY.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:AWS_REGION)) {
+            throw 'Repository Variable AWS_REGION is required.'
+          }
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -47,10 +50,23 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Validate STS and backend
+      - name: Resolve Terraform backend
+        shell: pwsh
         run: |
-          aws sts get-caller-identity
-          aws s3api head-bucket --bucket "${{ vars.TF_STATE_BUCKET }}"
+          $ErrorActionPreference = 'Stop'
+          $identity = aws sts get-caller-identity --output json | ConvertFrom-Json
+          $deterministicBucket = "oficina-terraform-state-$($identity.Account)-$env:AWS_REGION"
+          $bucket = $deterministicBucket
+          if (-not [string]::IsNullOrWhiteSpace($env:TF_STATE_BUCKET_FALLBACK) -and $env:TF_STATE_BUCKET_FALLBACK -ne $deterministicBucket) {
+            aws s3api head-bucket --bucket $deterministicBucket 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "Using temporary TF_STATE_BUCKET fallback. Rename or migrate the state bucket to $deterministicBucket to remove this variable."
+              $bucket = $env:TF_STATE_BUCKET_FALLBACK
+            }
+          }
+          aws s3api head-bucket --bucket $bucket
+          "TF_STATE_BUCKET=$bucket" | Add-Content -Path $env:GITHUB_ENV
+          "AWS_ACCOUNT_ID=$($identity.Account)" | Add-Content -Path $env:GITHUB_ENV
 
       - name: Validate Infra DB SSM prerequisites
         run: |
@@ -62,7 +78,7 @@ jobs:
             /oficina/infra/subnets/private/2 \
             /oficina/infra/rds/security-group-id \
             /oficina/infra/rds/master-secret-arn; do
-            aws ssm get-parameter --name "$name" --region "${{ vars.AWS_REGION }}" > "$RUNNER_TEMP/ssm-parameter.json"
+            aws ssm get-parameter --name "$name" --region "${AWS_REGION}" > "$RUNNER_TEMP/ssm-parameter.json"
           done
 
       - name: Validate versioned config
@@ -85,9 +101,9 @@ jobs:
         working-directory: terraform/platform
         run: |
           terraform init \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-            -backend-config="key=${{ vars.TF_STATE_KEY_PLATFORM }}" \
-            -backend-config="region=${{ vars.TF_STATE_REGION }}" \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=${TF_STATE_KEY_PLATFORM}" \
+            -backend-config="region=${AWS_REGION}" \
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true"
 
@@ -110,39 +126,71 @@ jobs:
 
       - name: Terraform plan
         working-directory: terraform/platform
-        run: terraform plan -var="aws_region=${{ vars.AWS_REGION }}" -out=tfplan
+        run: terraform plan -input=false -var="aws_region=${AWS_REGION}" -out=tfplan
 
-      - name: Terraform plan summary
+      - name: Validate plan safety
         working-directory: terraform/platform
-        run: terraform show -no-color tfplan | sed -E 's/(password|token|secret|license)([^[:space:]]*)/REDACTED/Ig' | tee plan-summary.txt
+        run: |
+          set -euo pipefail
+          terraform show -json tfplan > tfplan.json
+          blocked=$(jq '[.resource_changes[]? | select(.type | IN("aws_eks_cluster","aws_eks_node_group","aws_ecr_repository","aws_sqs_queue","aws_iam_role","aws_iam_openid_connect_provider","aws_ssm_parameter","aws_secretsmanager_secret")) | select(.change.actions | index("delete"))] | length' tfplan.json)
+          if [ "$blocked" -gt 0 ]; then
+            echo "Terraform plan contains delete or replacement actions for protected platform resources." >&2
+            jq -r '.resource_changes[]? | select(.change.actions | index("delete")) | "- " + .address + " " + (.change.actions | join(","))' tfplan.json >&2
+            exit 1
+          fi
+          {
+            echo "## Platform Terraform Plan"
+            echo
+            echo "| Action | Count |"
+            echo "| --- | ---: |"
+            for action in create update delete; do
+              count=$(jq "[.resource_changes[]? | select(.change.actions | index(\"$action\"))] | length" tfplan.json)
+              echo "| $action | $count |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Terraform apply approved plan
+      - name: Terraform apply
         working-directory: terraform/platform
-        run: terraform apply -auto-approve tfplan
+        run: terraform apply -input=false tfplan
 
       - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name oficina --region "${{ vars.AWS_REGION }}"
+        run: |
+          set -euo pipefail
+          cluster=$(aws ssm get-parameter --name /oficina/infra/cluster/name --region "${AWS_REGION}" --query Parameter.Value --output text)
+          namespace=$(aws ssm get-parameter --name /oficina/infra/cluster/namespace --region "${AWS_REGION}" --query Parameter.Value --output text)
+          echo "CLUSTER_NAME=$cluster" >> "$GITHUB_ENV"
+          echo "NAMESPACE=$namespace" >> "$GITHUB_ENV"
+          aws eks update-kubeconfig --name "$cluster" --region "${AWS_REGION}"
 
       - name: Wait for EKS and node group
         run: |
-          aws eks wait cluster-active --name oficina --region "${{ vars.AWS_REGION }}"
-          aws eks wait nodegroup-active --cluster-name oficina --nodegroup-name oficina --region "${{ vars.AWS_REGION }}"
+          aws eks wait cluster-active --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
+          aws eks wait nodegroup-active --cluster-name "${CLUSTER_NAME}" --nodegroup-name oficina --region "${AWS_REGION}"
           kubectl wait --for=condition=Ready nodes --all --timeout=20m
 
       - name: Validate add-ons and Helm releases
         run: |
-          aws eks list-addons --cluster-name oficina --region "${{ vars.AWS_REGION }}"
+          aws eks list-addons --cluster-name "${CLUSTER_NAME}" --region "${AWS_REGION}"
           helm list -A
 
       - name: Read-only platform validation
         shell: pwsh
-        run: ./scripts/validate-platform.ps1 -AwsRegion '${{ vars.AWS_REGION }}'
+        run: ./scripts/validate-platform.ps1 -ClusterName "$env:CLUSTER_NAME" -AwsRegion "$env:AWS_REGION"
 
-      - name: Summary
-        if: always()
+      - name: Publish summary
         run: |
           {
-            echo '### Platform Deploy'
+            echo '## Platform Deploy'
             echo
-            echo 'Manual platform workflow finished. Sensitive values are not printed here.'
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Account ID: ${AWS_ACCOUNT_ID}"
+            echo "- Region: ${AWS_REGION}"
+            echo "- Terraform state bucket: ${TF_STATE_BUCKET}"
+            echo "- Terraform state key: ${TF_STATE_KEY_PLATFORM}"
+            echo "- Cluster: ${CLUSTER_NAME}"
+            echo "- Namespace: ${NAMESPACE}"
+            echo "- EKS, add-ons, ECR and SQS validated"
+            echo
+            echo 'Sensitive values were not printed.'
           } >> "$GITHUB_STEP_SUMMARY"

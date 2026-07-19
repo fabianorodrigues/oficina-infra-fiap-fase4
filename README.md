@@ -1,41 +1,41 @@
 # Oficina
 
-Documentação de entrada da solução Oficina (FIAP Fase 4): oficina de veículos com
-cadastro de clientes, controle de estoque e ordens de serviço, expostos por um
-único ponto de entrada público e orquestrados sobre EKS.
+DocumentaÃ§Ã£o de entrada da soluÃ§Ã£o Oficina (FIAP Fase 4): oficina de veÃ­culos com
+cadastro de clientes, controle de estoque e ordens de serviÃ§o, expostos por um
+Ãºnico ponto de entrada pÃºblico e orquestrados sobre EKS.
 
-Este repositório (`oficina-infra-fiap-fase4`) provisiona a plataforma
+Este repositÃ³rio (`oficina-infra-fiap-fase4`) provisiona a plataforma
 compartilhada (EKS, ECR, SQS, IAM, addons, observabilidade) e o ponto de
-entrada público (API Gateway, VPC Link, ALB interno, Ingress). É o ponto
-inicial de leitura da solução.
+entrada pÃºblico (API Gateway, VPC Link, ALB interno, Ingress). Ã‰ o ponto
+inicial de leitura da soluÃ§Ã£o.
 
-## Sumário
+## SumÃ¡rio
 
-- [Visão geral](#visão-geral)
+- [VisÃ£o geral](#visÃ£o-geral)
 - [Arquitetura](#arquitetura)
-- [Repositórios](#repositórios)
+- [RepositÃ³rios](#repositÃ³rios)
 - [Responsabilidades](#responsabilidades)
 - [Fluxos principais](#fluxos-principais)
-- [Pré-requisitos](#pré-requisitos)
-- [Configuração](#configuração)
+- [PrÃ©-requisitos](#prÃ©-requisitos)
+- [ConfiguraÃ§Ã£o](#configuraÃ§Ã£o)
 - [Ordem de provisionamento](#ordem-de-provisionamento)
-- [Validação](#validação)
+- [ValidaÃ§Ã£o](#validaÃ§Ã£o)
 - [Observabilidade](#observabilidade)
 - [Testes E2E](#testes-e2e)
-- [Solução de problemas](#solução-de-problemas)
+- [SoluÃ§Ã£o de problemas](#soluÃ§Ã£o-de-problemas)
 
-## Visão geral
+## VisÃ£o geral
 
-A solução é composta por três microsserviços .NET independentes (Cadastro,
-Estoque, Ordens de Serviço), autenticação por Lambda (CPF/senha + JWT),
-mensageria assíncrona via SQS FIFO com Inbox/Outbox e uma Saga orquestrando o
-fluxo de ordem de serviço até a entrega, incluindo pagamento. O pagamento usa
-um gateway mock determinístico; a integração externa real (Mercado Pago) é uma
-pendência de contrato, não uma dependência de execução.
+A soluÃ§Ã£o Ã© composta por trÃªs microsserviÃ§os .NET independentes (Cadastro,
+Estoque, Ordens de ServiÃ§o), autenticaÃ§Ã£o por Lambda (CPF/senha + JWT),
+mensageria assÃ­ncrona via SQS FIFO com Inbox/Outbox e uma Saga orquestrando o
+fluxo de ordem de serviÃ§o atÃ© a entrega, incluindo pagamento. O pagamento usa
+um gateway mock determinÃ­stico; a integraÃ§Ã£o externa real (Mercado Pago) Ã© uma
+pendÃªncia de contrato, nÃ£o uma dependÃªncia de execuÃ§Ã£o.
 
-Cada microsserviço mantém banco lógico próprio no mesmo RDS SQL Server,
-pipeline própria e deploy independente. Não há uso de banco NoSQL nesta
-solução.
+Cada microsserviÃ§o mantÃ©m banco lÃ³gico prÃ³prio no mesmo RDS SQL Server,
+pipeline prÃ³pria e deploy independente. NÃ£o hÃ¡ uso de banco NoSQL nesta
+soluÃ§Ã£o.
 
 ## Arquitetura
 
@@ -59,45 +59,45 @@ flowchart TB
 
 Camadas de infraestrutura, cada uma com Terraform independente:
 
-| Camada | Repositório | Terraform state |
+| Camada | RepositÃ³rio | Terraform state |
 | ------ | ----------- | ---------------- |
 | Rede e banco (VPC, RDS SQL Server) | `oficina-infra-db-fiap-fase4` | `oficina/infra-db/terraform.tfstate` |
 | Plataforma (EKS, ECR, SQS, addons, observabilidade) | `oficina-infra-fiap-fase4` | `oficina/platform/terraform.tfstate` |
 | Ponto de entrada (API Gateway, VPC Link, Ingress/ALB) | `oficina-infra-fiap-fase4` | `oficina/entrypoint/terraform.tfstate` |
-| Autenticação (Lambdas) | `oficina-auth-lambda-fiap-fase4` | `oficina/auth/terraform.tfstate` |
+| AutenticaÃ§Ã£o (Lambdas) | `oficina-auth-lambda-fiap-fase4` | `oficina/auth/terraform.tfstate` |
 
-Recursos são descobertos por nome ou tag entre states sempre que seguro (ex.:
-ALB por nome, ECR por nome). SSM Parameter Store é usado apenas para valores
-que precisam atravessar workflows/execuções distintas (ex.: IDs de rede
-publicados pela Infra DB). Não há uso de `terraform_remote_state` em nenhuma
+Recursos sÃ£o descobertos por nome ou tag entre states sempre que seguro (ex.:
+ALB por nome, ECR por nome). SSM Parameter Store Ã© usado apenas para valores
+que precisam atravessar workflows/execuÃ§Ãµes distintas (ex.: IDs de rede
+publicados pela Infra DB). NÃ£o hÃ¡ uso de `terraform_remote_state` em nenhuma
 stack.
 
-## Repositórios
+## RepositÃ³rios
 
-| Repositório | Responsabilidade |
+| RepositÃ³rio | Responsabilidade |
 | ----------- | ----------------- |
-| `oficina-infra-db-fiap-fase4` | VPC, subnets, RDS SQL Server, bootstrap dos bancos e usuários |
-| `oficina-infra-fiap-fase4` | EKS, ECR, SQS, addons, observabilidade, entrypoint público (este repositório) |
-| `oficina-auth-lambda-fiap-fase4` | Lambdas de autenticação CPF/senha e Authorizer JWT |
-| `oficina-cadastro-fiap-fase4` | Domínio de clientes, veículos e catálogo |
-| `oficina-estoque-fiap-fase4` | Domínio de estoque, reservas e movimentações |
-| `oficina-ordens-servico-fiap-fase4` | Domínio de ordens de serviço, orçamento, Saga e pagamento |
+| `oficina-infra-db-fiap-fase4` | VPC, subnets, RDS SQL Server, bootstrap dos bancos e usuÃ¡rios |
+| `oficina-infra-fiap-fase4` | EKS, ECR, SQS, addons, observabilidade, entrypoint pÃºblico (este repositÃ³rio) |
+| `oficina-auth-lambda-fiap-fase4` | Lambdas de autenticaÃ§Ã£o CPF/senha e Authorizer JWT |
+| `oficina-cadastro-fiap-fase4` | DomÃ­nio de clientes, veÃ­culos e catÃ¡logo |
+| `oficina-estoque-fiap-fase4` | DomÃ­nio de estoque, reservas e movimentaÃ§Ãµes |
+| `oficina-ordens-servico-fiap-fase4` | DomÃ­nio de ordens de serviÃ§o, orÃ§amento, Saga e pagamento |
 
 ## Responsabilidades
 
-- **Cadastro, Estoque e Ordens de Serviço** são independentes: CI própria,
-  deploy próprio, banco lógico próprio, sem acoplamento de código entre si.
-- **Auth** emite e valida JWT (HS256); não hospeda regra de negócio de domínio.
-- **Infra DB** possui rede e dados; não conhece Kubernetes nem os
-  microsserviços.
-- **Platform** possui o cluster, os addons e a observabilidade; não conhece
-  código de aplicação nem regras de negócio.
-- **Entrypoint** (também neste repositório) possui o ponto de entrada público;
-  não processa regra de negócio, apenas roteia e autentica.
+- **Cadastro, Estoque e Ordens de ServiÃ§o** sÃ£o independentes: CI prÃ³pria,
+  deploy prÃ³prio, banco lÃ³gico prÃ³prio, sem acoplamento de cÃ³digo entre si.
+- **Auth** emite e valida JWT (HS256); nÃ£o hospeda regra de negÃ³cio de domÃ­nio.
+- **Infra DB** possui rede e dados; nÃ£o conhece Kubernetes nem os
+  microsserviÃ§os.
+- **Platform** possui o cluster, os addons e a observabilidade; nÃ£o conhece
+  cÃ³digo de aplicaÃ§Ã£o nem regras de negÃ³cio.
+- **Entrypoint** (tambÃ©m neste repositÃ³rio) possui o ponto de entrada pÃºblico;
+  nÃ£o processa regra de negÃ³cio, apenas roteia e autentica.
 
 ## Fluxos principais
 
-### Autenticação
+### AutenticaÃ§Ã£o
 
 ```mermaid
 sequenceDiagram
@@ -111,13 +111,13 @@ sequenceDiagram
     GW->>Auth: invoke (AWS_PROXY, live)
     Auth->>DB: consulta Funcionarios (somente leitura)
     Auth-->>C: JWT (HS256, exp 60min)
-    C->>GW: requisição com Bearer JWT
+    C->>GW: requisiÃ§Ã£o com Bearer JWT
     GW->>Authz: REQUEST authorizer (live)
     Authz-->>GW: policy + claims
     GW->>GW: injeta headers x-oficina-user-*
 ```
 
-### Mensageria (Estoque ↔ Ordens)
+### Mensageria (Estoque â†” Ordens)
 
 ```mermaid
 sequenceDiagram
@@ -126,154 +126,147 @@ sequenceDiagram
     participant Estoque
     participant SQSEvt as SQS oficina-ordens-eventos.fifo
 
-    Ordens->>SQSCmd: comando (Outbox, mesma transação)
+    Ordens->>SQSCmd: comando (Outbox, mesma transaÃ§Ã£o)
     SQSCmd->>Estoque: consumo (Inbox, idempotente)
     Estoque->>Estoque: reserva/baixa de estoque
     Estoque->>SQSEvt: evento de resultado (Outbox)
     SQSEvt->>Ordens: consumo (Inbox, idempotente)
-    Ordens->>Ordens: avança a Saga
+    Ordens->>Ordens: avanÃ§a a Saga
 ```
 
-DLQs FIFO dedicadas para as duas filas; publicação em SQS nunca ocorre dentro
-da transação de banco (Outbox garante entrega após commit).
+DLQs FIFO dedicadas para as duas filas; publicaÃ§Ã£o em SQS nunca ocorre dentro
+da transaÃ§Ã£o de banco (Outbox garante entrega apÃ³s commit).
 
-### Saga da ordem de serviço
+### Saga da ordem de serviÃ§o
 
 ```mermaid
 stateDiagram-v2
     [*] --> AguardandoAprovacao
-    AguardandoAprovacao --> ReservaSolicitada: aprovar orçamento
+    AguardandoAprovacao --> ReservaSolicitada: aprovar orÃ§amento
     ReservaSolicitada --> ReservaRecusada: saldo insuficiente
     ReservaSolicitada --> PagamentoSolicitado: reserva confirmada
     PagamentoSolicitado --> Recusado: pagamento recusado
     PagamentoSolicitado --> EmExecucao: pagamento aprovado
     EmExecucao --> Concluida: finalizar + entregar
     ReservaRecusada --> [*]
-    Recusado --> Compensada: compensação
+    Recusado --> Compensada: compensaÃ§Ã£o
     Compensada --> [*]
     Concluida --> [*]
 ```
 
-Pagamento usa `IPaymentGateway` com implementação mock determinística e
-idempotente (`MockPaymentGateway`), sem chamada HTTP externa e sem dependência
-de webhook. A integração real (Mercado Pago) é uma pendência de contrato.
+Pagamento usa `IPaymentGateway` com implementaÃ§Ã£o mock determinÃ­stica e
+idempotente (`MockPaymentGateway`), sem chamada HTTP externa e sem dependÃªncia
+de webhook. A integraÃ§Ã£o real (Mercado Pago) Ã© uma pendÃªncia de contrato.
 
-## Pré-requisitos
+## PrÃ©-requisitos
 
-- Conta AWS com credenciais temporárias configuradas nos Repository Secrets
-  dos seis repositórios antes de executar qualquer workflow de provisionamento.
+- Conta AWS com credenciais temporÃ¡rias configuradas nos Repository Secrets
+  dos seis repositÃ³rios antes de executar qualquer workflow de provisionamento.
 - `AWS_REGION` configurada como Repository Variable.
-- Terraform 1.10+, .NET 10 SDK, Docker, kubectl e Helm para validação local.
+- Terraform 1.10+, .NET 10 SDK, Docker, kubectl e Helm para validaÃ§Ã£o local.
 
-## Configuração
+## ConfiguraÃ§Ã£o
 
-- `config/official.yml`: nomes estáveis e não sensíveis da plataforma
+- `config/official.yml`: nomes estÃ¡veis e nÃ£o sensÃ­veis da plataforma
   (cluster, namespace, ECR, addons).
-- `config/resource-contract.yml`: caminhos SSM de entrada/saída e nomes dos
+- `config/resource-contract.yml`: caminhos SSM de entrada/saÃ­da e nomes dos
   secrets compartilhados, consumidos pelo Terraform.
-- `config/solution.yml`: contrato humano da solução (nomes de serviços,
-  bancos, filas, entrypoint, sequência de provisionamento) — referência para
-  documentação e validações; nenhuma aplicação o lê em runtime.
+- `config/solution.yml`: contrato humano da soluÃ§Ã£o (nomes de serviÃ§os,
+  bancos, filas, entrypoint, sequÃªncia de provisionamento) â€” referÃªncia para
+  documentaÃ§Ã£o e validaÃ§Ãµes; nenhuma aplicaÃ§Ã£o o lÃª em runtime.
 - `config/entrypoint.json` e `config/ingress-routes.json`: contratos versionados
   do API Gateway e do Ingress compartilhado.
 
-Nenhum destes arquivos contém senha, ARN gerado, URL real de fila/API ou
+Nenhum destes arquivos contÃ©m senha, ARN gerado, URL real de fila/API ou
 Account ID.
 
 ## Ordem de provisionamento
 
 ```mermaid
 flowchart LR
-    A[Backend Bootstrap] --> B[Infra DB Deploy]
-    B --> C[Observability Secret Sync]
-    C --> D[Platform Deploy]
-    D --> E[Database Secrets Sync]
-    E --> F[Database Bootstrap]
-    F --> G[Auth Secret Sync]
-    G --> H[Auth Deploy]
-    H --> I[Cadastro / Estoque / Ordens Deploy]
-    I --> J[Entrypoint Deploy]
-    J --> K[E2E Validate]
+    A[Database Infrastructure Deploy] --> B[Platform Deploy]
+    B --> C[Database Bootstrap]
+    C --> D[Auth Deploy]
+    D --> E[Cadastro / Estoque / Ordens Deploy]
+    E --> F[Entrypoint Deploy]
+    F --> G[AWS E2E Validate]
+    G --> H[Observability Validate]
 ```
 
-1. **Backend Bootstrap** (`oficina-infra-db-fiap-fase4`) — cria o bucket do
-   Terraform state.
-2. **Infra DB Deploy** (`oficina-infra-db-fiap-fase4`) — VPC, subnets, RDS.
-3. **Observability Secret Sync** (`oficina-infra-fiap-fase4`) — sincroniza a
-   licença New Relic no Secrets Manager antes do Platform Deploy.
-4. **Platform Deploy** (`oficina-infra-fiap-fase4`) — EKS, ECR, SQS, addons e
-   observabilidade (OpenTelemetry Collector e New Relic via Helm, gerenciados
-   pelo próprio Terraform desta stack).
-5. **Database Secrets Sync** + **Database Bootstrap**
-   (`oficina-infra-db-fiap-fase4`) — sincroniza os secrets SQL e executa o Job
-   Kubernetes que cria bancos, logins e usuários.
-6. **Auth Secret Sync** + **Auth Deploy** (`oficina-auth-lambda-fiap-fase4`) —
-   sincroniza a chave JWT e publica as duas Lambdas.
-7. **Cadastro Deploy**, **Estoque Deploy**, **Ordens Deploy** — independentes
-   entre si, podem rodar em paralelo após os passos anteriores.
-8. **Entrypoint Deploy** (`oficina-infra-fiap-fase4`) — aplica o Ingress
-   compartilhado, aguarda o ALB interno, e então provisiona API Gateway e VPC
-   Link no mesmo workflow (sem handoff intermediário por SSM).
-9. **E2E Validate** (`oficina-ordens-servico-fiap-fase4`) — valida o fluxo
-   completo via Docker Compose (Cadastro, Estoque, Ordens, LocalStack,
-   WireMock).
+1. **Database Infrastructure Deploy** (`oficina-infra-db-fiap-fase4`) cria ou
+   reconcilia o backend Terraform, provisiona VPC/RDS/SSM/Secrets Manager e
+   sincroniza os sete secrets SQL.
+2. **Platform Deploy** (`oficina-infra-fiap-fase4`) provisiona EKS, ECR, SQS,
+   add-ons e publica outputs em SSM.
+3. **Database Bootstrap** (`oficina-infra-db-fiap-fase4`) executa o Job no EKS
+   para criar bancos, logins, usuarios e permissoes.
+4. **Auth Deploy** (`oficina-auth-lambda-fiap-fase4`) aplica Terraform,
+   sincroniza `/oficina/auth/jwt` e publica as Lambdas com alias `live`.
+5. **Cadastro Deploy**, **Estoque Deploy**, **Ordens Deploy** permanecem
+   independentes e podem rodar em paralelo.
+6. **Entrypoint Deploy** (`oficina-infra-fiap-fase4`) aplica o Ingress, aguarda o
+   ALB interno e provisiona API Gateway/VPC Link.
+7. **AWS E2E Validate** (`oficina-ordens-servico-fiap-fase4`) resolve a API por
+   SSM e valida o fluxo principal na AWS com pagamento mock aprovado.
+8. **Observability Validate** (`oficina-infra-fiap-fase4`) valida CloudWatch,
+   EKS/add-ons e health endpoints sem alterar recursos.
 
-Consulte o README de cada repositório para os comandos específicos de cada
+Consulte o README de cada repositÃ³rio para os comandos especÃ­ficos de cada
 etapa.
 
-## Validação
+## ValidaÃ§Ã£o
 
-Validações locais (sem acesso à AWS): `terraform fmt`, `terraform validate`,
+ValidaÃ§Ãµes locais (sem acesso Ã  AWS): `terraform fmt`, `terraform validate`,
 `terraform init -backend=false`, `helm lint`/`helm template`, `kubectl apply
---dry-run=client`, PowerShell AST, e as buscas estáticas descritas em cada
+--dry-run=client`, PowerShell AST, e as buscas estÃ¡ticas descritas em cada
 workflow de CI.
 
-Validações após provisionamento real: workflows `*-deploy.yml` incluem passos
-de validação read-only (health, rotas, filas, Saga) antes de encerrar.
+ValidaÃ§Ãµes apÃ³s provisionamento real: workflows `*-deploy.yml` incluem passos
+de validaÃ§Ã£o read-only (health, rotas, filas, Saga) antes de encerrar.
 
 ## Observabilidade
 
-- **Traces**: aplicações → OTLP → OpenTelemetry Collector → New Relic.
-- **Logs**: stdout estruturado (JSON) → coleta padrão do cluster → New Relic.
-- **Métricas Kubernetes**: New Relic Kubernetes Integration → New Relic.
-- **Métricas AWS**: CloudWatch.
+- **Logs de aplicacao**: stdout estruturado em pods, consultado via CloudWatch e
+  `kubectl logs`.
+- **Logs do entrypoint**: API Gateway access logs em CloudWatch.
+- **Metricas AWS**: CloudWatch para API Gateway, EKS, RDS e SQS.
+- **Saude operacional**: health/readiness dos tres microsservicos, EKS Ready,
+  add-ons, ALB interno e VPC Link `AVAILABLE`.
 
-Cada sinal tem um único caminho de coleta; não há duplicidade de ferramentas
-para o mesmo sinal. A licença New Relic é sincronizada pelo workflow
-`Observability Secret Sync` e nunca é impressa em logs.
+New Relic permanece fora do caminho principal de provisionamento e validacao.
 
 ## Testes E2E
 
-O workflow `E2E Validate` (`oficina-ordens-servico-fiap-fase4`) sobe Cadastro,
-Estoque, Ordens, LocalStack e WireMock via Docker Compose e executa o fluxo
-completo: orçamento aprovado, reserva de estoque, pagamento mock aprovado,
-Saga concluída até a entrega, além dos cenários de saldo insuficiente,
-pagamento recusado (com compensação) e mensagem fora de ordem.
+O workflow `AWS E2E Validate` (`oficina-ordens-servico-fiap-fase4`) resolve a
+URL da API via SSM, gera token bootstrap sem imprimir o `SigningKey`, cria dados
+sinteticos unicos, autentica via `/api/auth/cpf` e executa o fluxo principal:
+Cadastro, Estoque, abertura de Ordem, aprovacao de Orcamento, pagamento mock
+aprovado e reserva de estoque ate a Ordem chegar em `EmExecucao`.
 
 ```text
 Pagamento mock aprovado: validado
-Compensação mock: validada
-Integração externa de pagamentos: pendente de contrato
+SQS FIFO e health endpoints: validados
+IntegraÃ§Ã£o externa de pagamentos: pendente de contrato
 ```
 
-Não há exigência de NoSQL em nenhuma validação, matriz ou README da solução.
+NÃ£o hÃ¡ exigÃªncia de NoSQL em nenhuma validaÃ§Ã£o, matriz ou README da soluÃ§Ã£o.
 
-## Solução de problemas
+## SoluÃ§Ã£o de problemas
 
 - **Terraform plan divergente**: confirme que nenhum recurso foi criado fora
-  do Terraform (console, CLI manual); os states não usam
-  `terraform_remote_state`, então divergências entre stacks costumam indicar
+  do Terraform (console, CLI manual); os states nÃ£o usam
+  `terraform_remote_state`, entÃ£o divergÃªncias entre stacks costumam indicar
   um SSM parameter desatualizado.
-- **ALB não fica `active`**: verifique se o AWS Load Balancer Controller está
+- **ALB nÃ£o fica `active`**: verifique se o AWS Load Balancer Controller estÃ¡
   `Ready` (`Platform Deploy`) antes de rodar `Entrypoint Deploy`.
-- **Rota protegida retorna 401/403**: confirme que o Authorizer está usando o
+- **Rota protegida retorna 401/403**: confirme que o Authorizer estÃ¡ usando o
   alias `live` e que o JWT foi emitido pelo mesmo `SigningKey` publicado em
   `/oficina/auth/jwt`.
 - **Mensagem presa no Inbox**: consulte `InboxMessages`/`OutboxMessages` no
-  banco do serviço; o dispatcher do Outbox não publica dentro da transação
-  original, então uma falha de publicação não deixa o banco inconsistente.
+  banco do serviÃ§o; o dispatcher do Outbox nÃ£o publica dentro da transaÃ§Ã£o
+  original, entÃ£o uma falha de publicaÃ§Ã£o nÃ£o deixa o banco inconsistente.
 
-## Próximo componente
+## PrÃ³ximo componente
 
 Siga para [oficina-infra-db-fiap-fase4](../oficina-infra-db-fiap-fase4/README.md)
 para provisionar rede e banco.

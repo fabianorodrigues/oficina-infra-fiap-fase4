@@ -17,16 +17,13 @@ concurrency:
 
 jobs:
   deploy:
-    name: Manual entrypoint deploy
+    name: Deploy entrypoint
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
-      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
-      TF_STATE_REGION: ${{ vars.TF_STATE_REGION }}
-      TF_STATE_KEY: ${{ vars.TF_STATE_KEY_ENTRYPOINT }}
-      CLUSTER_NAME: oficina
-      NAMESPACE: oficina
+      TF_STATE_KEY_ENTRYPOINT: oficina/entrypoint/terraform.tfstate
+      TF_STATE_BUCKET_FALLBACK: ${{ vars.TF_STATE_BUCKET }}
       INGRESS_NAME: oficina
       ALB_NAME: oficina
       API_NAME: oficina-api
@@ -36,20 +33,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate branch
-        run: test "${GITHUB_REF}" = "refs/heads/main"
-
-      - name: Validate confirmation
-        run: test "${{ inputs.confirmation }}" = "APPLY"
-
-      - name: Validate repository variables
+      - name: Validate request
+        shell: pwsh
         run: |
-          set -euo pipefail
-          test -n "${AWS_REGION}"
-          test -n "${TF_STATE_BUCKET}"
-          test -n "${TF_STATE_REGION}"
-          test "${TF_STATE_KEY}" = "oficina/entrypoint/terraform.tfstate"
-          echo 'Repository variables present.'
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+            throw 'This workflow must run from main.'
+          }
+          if ('${{ inputs.confirmation }}' -cne 'APPLY') {
+            throw 'Confirmation must be APPLY.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:AWS_REGION)) {
+            throw 'Repository Variable AWS_REGION is required.'
+          }
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
@@ -84,29 +80,46 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Validate STS
-        run: aws sts get-caller-identity
-
-      # --- Phase 1: Ingress (internal ALB) ---------------------------------
+      - name: Resolve Terraform backend
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $identity = aws sts get-caller-identity --output json | ConvertFrom-Json
+          $deterministicBucket = "oficina-terraform-state-$($identity.Account)-$env:AWS_REGION"
+          $bucket = $deterministicBucket
+          if (-not [string]::IsNullOrWhiteSpace($env:TF_STATE_BUCKET_FALLBACK) -and $env:TF_STATE_BUCKET_FALLBACK -ne $deterministicBucket) {
+            aws s3api head-bucket --bucket $deterministicBucket 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "Using temporary TF_STATE_BUCKET fallback. Rename or migrate the state bucket to $deterministicBucket to remove this variable."
+              $bucket = $env:TF_STATE_BUCKET_FALLBACK
+            }
+          }
+          aws s3api head-bucket --bucket $bucket
+          "TF_STATE_BUCKET=$bucket" | Add-Content -Path $env:GITHUB_ENV
+          "AWS_ACCOUNT_ID=$($identity.Account)" | Add-Content -Path $env:GITHUB_ENV
 
       - name: Resolve infra parameters from SSM
         run: |
           set -euo pipefail
-          cluster=$(aws ssm get-parameter --name /oficina/infra/cluster/name --query Parameter.Value --output text)
-          vpc=$(aws ssm get-parameter --name /oficina/infra/vpc/id --query Parameter.Value --output text)
-          subnet1=$(aws ssm get-parameter --name /oficina/infra/subnets/private/1 --query Parameter.Value --output text)
-          subnet2=$(aws ssm get-parameter --name /oficina/infra/subnets/private/2 --query Parameter.Value --output text)
-          test "$cluster" = "${CLUSTER_NAME}"
+          cluster=$(aws ssm get-parameter --name /oficina/infra/cluster/name --region "${AWS_REGION}" --query Parameter.Value --output text)
+          namespace=$(aws ssm get-parameter --name /oficina/infra/cluster/namespace --region "${AWS_REGION}" --query Parameter.Value --output text)
+          vpc=$(aws ssm get-parameter --name /oficina/infra/vpc/id --region "${AWS_REGION}" --query Parameter.Value --output text)
+          subnet1=$(aws ssm get-parameter --name /oficina/infra/subnets/private/1 --region "${AWS_REGION}" --query Parameter.Value --output text)
+          subnet2=$(aws ssm get-parameter --name /oficina/infra/subnets/private/2 --region "${AWS_REGION}" --query Parameter.Value --output text)
+          test -n "$cluster"
+          test -n "$namespace"
           test "$subnet1" != "$subnet2"
           for s in "$subnet1" "$subnet2"; do
-            svpc=$(aws ec2 describe-subnets --subnet-ids "$s" --query 'Subnets[0].VpcId' --output text)
+            svpc=$(aws ec2 describe-subnets --subnet-ids "$s" --region "${AWS_REGION}" --query 'Subnets[0].VpcId' --output text)
             test "$svpc" = "$vpc"
           done
           {
+            echo "CLUSTER_NAME=$cluster"
+            echo "NAMESPACE=$namespace"
             echo "SUBNET1=$subnet1"
             echo "SUBNET2=$subnet2"
           } >> "$GITHUB_ENV"
-          echo "Resolved private subnets in VPC $vpc."
+          echo "Resolved cluster, namespace and private subnets in VPC $vpc."
 
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
@@ -260,9 +273,9 @@ jobs:
         run: |
           set -euo pipefail
           for p in /oficina/auth/cpf/function-name /oficina/auth/authorizer/function-name; do
-            fn=$(aws ssm get-parameter --name "$p" --query Parameter.Value --output text)
-            aws lambda get-function --function-name "$fn" >/dev/null
-            aws lambda get-alias --function-name "$fn" --name live >/dev/null
+            fn=$(aws ssm get-parameter --name "$p" --region "${AWS_REGION}" --query Parameter.Value --output text)
+            aws lambda get-function --function-name "$fn" --region "${AWS_REGION}" >/dev/null
+            aws lambda get-alias --function-name "$fn" --name live --region "${AWS_REGION}" >/dev/null
             echo "Lambda $fn has a live alias."
           done
 
@@ -314,8 +327,8 @@ jobs:
         run: |
           terraform init \
             -backend-config="bucket=${TF_STATE_BUCKET}" \
-            -backend-config="key=${TF_STATE_KEY}" \
-            -backend-config="region=${TF_STATE_REGION}" \
+            -backend-config="key=${TF_STATE_KEY_ENTRYPOINT}" \
+            -backend-config="region=${AWS_REGION}" \
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true"
 
@@ -338,7 +351,7 @@ jobs:
 
       - name: Terraform plan
         working-directory: terraform/entrypoint
-        run: terraform plan -input=false -out=tfplan
+        run: terraform plan -input=false -out=tfplan -var="aws_region=${AWS_REGION}"
 
       # Sanitized plan summary (counts and resource types only, no values).
       - name: Publish plan summary
@@ -346,11 +359,17 @@ jobs:
         run: |
           set -euo pipefail
           terraform show -json tfplan > plan.json
+          blocked=$(jq '[.resource_changes[]? | select(.type | IN("aws_apigatewayv2_api","aws_apigatewayv2_vpc_link","aws_security_group","aws_security_group_rule","aws_lambda_permission","aws_cloudwatch_log_group","aws_ssm_parameter")) | select(.change.actions | index("delete"))] | length' plan.json)
+          if [ "$blocked" -gt 0 ]; then
+            echo "Terraform plan contains delete or replacement actions for protected entrypoint resources." >&2
+            jq -r '.resource_changes[]? | select(.change.actions | index("delete")) | "- " + .address + " " + (.change.actions | join(","))' plan.json >&2
+            exit 1
+          fi
           {
-            echo '### Entrypoint plan (sanitized)'
+            echo '## Entrypoint Terraform Plan'
             echo
             echo '| Action | Count |'
-            echo '| ------ | ----- |'
+            echo '| --- | ---: |'
             for action in create update delete; do
               c=$(jq "[.resource_changes[] | select(.change.actions | index(\"$action\"))] | length" plan.json)
               echo "| $action | $c |"
@@ -412,13 +431,17 @@ jobs:
           aws apigatewayv2 get-vpc-links --query "Items[?Name=='${VPC_LINK_NAME}']" || true
           aws apigatewayv2 get-apis --query "Items[?Name=='${API_NAME}']" || true
 
-      - name: Summary
+      - name: Publish summary
         if: always()
         run: |
           {
-            echo '### Entrypoint Deploy'
+            echo '## Entrypoint Deploy'
             echo
             echo "- Commit: ${GITHUB_SHA}"
+            echo "- Account ID: ${AWS_ACCOUNT_ID:-unknown}"
+            echo "- Region: ${AWS_REGION}"
+            echo "- Terraform state bucket: ${TF_STATE_BUCKET:-unknown}"
+            echo "- Terraform state key: ${TF_STATE_KEY_ENTRYPOINT}"
             echo "- Cluster: ${CLUSTER_NAME}"
             echo "- Namespace: ${NAMESPACE}"
             echo "- Ingress: ${INGRESS_NAME}"

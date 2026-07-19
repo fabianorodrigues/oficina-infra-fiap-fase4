@@ -9,6 +9,7 @@ inputs:
 
 outputs:
   clusterName: /oficina/infra/cluster/name
+  clusterNamespace: /oficina/infra/cluster/namespace
   clusterArn: /oficina/infra/cluster/arn
   clusterEndpoint: /oficina/infra/cluster/endpoint
   clusterSecurityGroupId: /oficina/infra/cluster/security-group-id

@@ -60,16 +60,13 @@ terraformStates:
   auth: oficina/auth/terraform.tfstate
 
 provisioningOrder:
-  - Backend Bootstrap
-  - Infra DB Deploy
-  - Observability Secret Sync
+  - Database Infrastructure Deploy
   - Platform Deploy
-  - Database Secrets Sync
   - Database Bootstrap
-  - Auth Secret Sync
   - Auth Deploy
   - Cadastro Deploy
   - Estoque Deploy
   - Ordens Deploy
   - Entrypoint Deploy
-  - E2E Validate
+  - AWS E2E Validate
+  - Observability Validate
