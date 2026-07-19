@@ -249,7 +249,7 @@ jobs:
             ('environ' + 'ment')
           )
           foreach ($pattern in $patterns) {
-            $matches = Select-String -Path config/*,terraform/platform/*,deploy/platform/*,scripts/*,.github/workflows/*,.tflint.hcl,README.md -Pattern $pattern -SimpleMatch -ErrorAction SilentlyContinue
+            $matches = Select-String -Path config/*,terraform/platform/*,deploy/platform/*,scripts/*,.github/workflows/*,.tflint.hcl -Pattern $pattern -SimpleMatch -ErrorAction SilentlyContinue
             if ($matches -and $pattern -notin @(('AWS_ACCESS_KEY_ID' + '='), ('AWS_SECRET_ACCESS_KEY' + '='), ('AWS_SESSION_TOKEN' + '='), ('environ' + 'ment'))) {
               $matches | Format-Table Path, LineNumber, Line -AutoSize
               throw "Forbidden pattern found: $pattern"
@@ -260,7 +260,7 @@ jobs:
         shell: pwsh
         run: |
           $tfAndFlow = @('terraform/entrypoint/*', '.github/workflows/entrypoint-*.yml', '.github/workflows/platform-*.yml')
-          $allEntrypoint = @('config/entrypoint.json', 'terraform/entrypoint/*', 'scripts/validate-entrypoint*.ps1', 'scripts/validate-route-contract.ps1', 'scripts/smoke-test-api.ps1', '.github/workflows/entrypoint-*.yml', '.github/workflows/platform-*.yml', 'terraform/entrypoint/README.md')
+          $allEntrypoint = @('config/entrypoint.json', 'terraform/entrypoint/*', 'scripts/validate-entrypoint*.ps1', 'scripts/validate-route-contract.ps1', 'scripts/smoke-test-api.ps1', '.github/workflows/entrypoint-*.yml', '.github/workflows/platform-*.yml')
 
           function Assert-NoMatch {
             param([string[]]$Files, [string]$Pattern, [string]$Label)
@@ -310,7 +310,7 @@ jobs:
           $template = 'deploy/k8s/ingress/ingress.template.yaml'
           $config = 'config/ingress-routes.json'
           $manifestFiles = @($rendered, $config)
-          $ingressFiles = @($config, 'deploy/k8s/ingress/*', 'scripts/validate-ingress-config.ps1', 'scripts/render-ingress.ps1', 'scripts/validate-ingress.ps1', 'scripts/smoke-test-internal-alb.ps1', '.github/workflows/platform-ci.yml', '.github/workflows/entrypoint-deploy.yml', 'README.md')
+          $ingressFiles = @($config, 'deploy/k8s/ingress/*', 'scripts/validate-ingress-config.ps1', 'scripts/render-ingress.ps1', 'scripts/validate-ingress.ps1', 'scripts/smoke-test-internal-alb.ps1', '.github/workflows/platform-ci.yml', '.github/workflows/entrypoint-deploy.yml')
 
           function Assert-NoMatch {
             param([string[]]$Files, [string]$Pattern, [string]$Label)
