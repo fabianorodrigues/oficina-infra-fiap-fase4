@@ -15,6 +15,8 @@ locals {
 # CUSTOM routes attach the JWT authorizer; NONE routes (auth, health, the public
 # acoes-externas) attach none.
 resource "aws_apigatewayv2_route" "this" {
+  #checkov:skip=CKV_AWS_309:authorization_type is sourced from the versioned route contract; validators allow NONE only for auth, health, and explicit public callback routes.
+
   for_each = local.routes_by_id
 
   api_id             = aws_apigatewayv2_api.this.id

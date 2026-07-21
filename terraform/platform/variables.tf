@@ -12,13 +12,13 @@ variable "aws_region" {
 variable "cluster_enabled_log_types" {
   description = "EKS control plane log types enabled for the cluster."
   type        = list(string)
-  default     = ["api", "audit", "authenticator"]
+  default     = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
 }
 
 variable "load_balancer_controller_chart_version" {
-  description = "Optional chart version for AWS Load Balancer Controller. Leave empty to use the chart repository default."
+  description = "Chart version for AWS Load Balancer Controller. Keep aligned with the IAM policy embedded in iam.tf."
   type        = string
-  default     = ""
+  default     = "3.4.1"
 }
 
 variable "secrets_store_csi_driver_chart_version" {

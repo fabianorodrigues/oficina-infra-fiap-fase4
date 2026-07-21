@@ -1,7 +1,7 @@
 aws_region = "us-east-1"
 
-# Leave chart versions empty to let Helm resolve the current compatible chart from each repository.
-load_balancer_controller_chart_version = ""
+# Keep this aligned with terraform/platform/iam.tf.
+load_balancer_controller_chart_version = "3.4.1"
 secrets_store_csi_driver_chart_version = ""
 ascp_chart_version                     = ""
 opentelemetry_collector_chart_version  = ""

@@ -4,6 +4,10 @@ resource "aws_ecr_repository" "service" {
   name                 = each.value
   image_tag_mutability = local.official.ecr.imageTagMutability
 
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
+
   image_scanning_configuration {
     scan_on_push = local.official.ecr.scanOnPush
   }

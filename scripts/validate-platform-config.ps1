@@ -31,6 +31,19 @@ if ($official -notmatch '(?ms)^cluster:\s+.*?^\s{2}namespace: oficina\s*$') { Fa
 if ($official -notmatch '(?m)^\s{2}mode: (pod-identity|irsa)\s*$') { Fail "workloadIdentity.mode must be pod-identity or irsa." }
 if ($official -notmatch '(?ms)^observability:\s+.*?^\s{2}enableNewRelic: false\s*$') { Fail "observability.enableNewRelic must start as false." }
 
+$kubernetesVersionMatch = [regex]::Match($official, '(?m)^\s{2}kubernetesVersion:\s*"?([^"\r\n]*)"?\s*$')
+if (-not $kubernetesVersionMatch.Success) { Fail "cluster.kubernetesVersion must be declared." }
+$kubernetesVersion = $kubernetesVersionMatch.Groups[1].Value.Trim()
+if ($kubernetesVersion.Length -gt 0) {
+    if ($kubernetesVersion -notmatch '^\d+\.\d+$') { Fail "cluster.kubernetesVersion must use the EKS minor format, for example 1.30." }
+    $versionParts = $kubernetesVersion.Split('.')
+    $major = [int]$versionParts[0]
+    $minor = [int]$versionParts[1]
+    if ($major -lt 1 -or ($major -eq 1 -and $minor -lt 28)) {
+        Fail "cluster.kubernetesVersion must be empty for the AWS default or explicitly set to 1.28 or newer."
+    }
+}
+
 Assert-MatchCount $official '(?m)^\s{2}(cadastro|estoque|ordens): oficina-[a-z-]+\s*$' 3 'Exactly three ECR repository names are required.'
 Assert-MatchCount $contract '(?m)^\s{2}[A-Za-z]+.*QueueUrl: /oficina/infra/sqs/.+/url\s*$' 2 'Exactly two main queue URL outputs are required.'
 Assert-MatchCount $contract '(?m)^\s{2}[A-Za-z]+.*DlqUrl: /oficina/infra/sqs/.+/url\s*$' 2 'Exactly two DLQ URL outputs are required.'

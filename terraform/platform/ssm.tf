@@ -1,4 +1,6 @@
 resource "aws_ssm_parameter" "outputs" {
+  #checkov:skip=CKV2_AWS_34:These SSM parameters publish non-sensitive technical outputs only (names, ARNs, IDs, endpoints, and URLs); keep String so consumers do not require decryption.
+
   for_each = {
     (local.resource_contract.outputs.clusterName)            = aws_eks_cluster.this.name
     (local.resource_contract.outputs.clusterNamespace)       = kubernetes_namespace.oficina.metadata[0].name

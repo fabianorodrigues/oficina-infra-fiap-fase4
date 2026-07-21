@@ -18,9 +18,11 @@ resource "aws_iam_role_policy_attachment" "eks_cluster" {
   policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/AmazonEKSClusterPolicy"
 }
 
-# checkov:skip=CKV_AWS_38:Public EKS API endpoint is required for GitHub-hosted runners; access remains IAM/Kubernetes-authorized.
-# checkov:skip=CKV_AWS_39:Private endpoint is enabled; public endpoint is retained for GitHub-hosted runner operations.
 resource "aws_eks_cluster" "this" {
+  #checkov:skip=CKV_AWS_38:Public EKS API endpoint is required for GitHub-hosted runners; access remains IAM/Kubernetes-authorized.
+  #checkov:skip=CKV_AWS_39:Private endpoint is enabled; public endpoint is retained for GitHub-hosted runner operations.
+  #checkov:skip=CKV_AWS_58:EKS 1.28+ encrypts Kubernetes API data by default; explicit lower versions are blocked by platform config validation.
+
   name     = local.cluster_name
   role_arn = aws_iam_role.eks_cluster.arn
   version  = trimspace(local.official.cluster.kubernetesVersion) == "" ? null : local.official.cluster.kubernetesVersion
