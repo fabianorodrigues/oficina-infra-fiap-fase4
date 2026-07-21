@@ -110,6 +110,7 @@ jobs:
           routes_file="$RUNNER_TEMP/entrypoint-route-keys.txt"
           bad_file="$RUNNER_TEMP/entrypoint-forbidden-route-keys.txt"
           catchall_file="$RUNNER_TEMP/entrypoint-catchall-route-keys.txt"
+          catchall_pattern="^(\\\$default|ANY /\\{proxy\\+\\}|ANY /api/\\{proxy\\+\\}|ANY /)$"
 
           jq -r '.routes[].routeKey' config/entrypoint.json > "$routes_file"
 
@@ -119,7 +120,7 @@ jobs:
             exit 1
           fi
 
-          if grep -E '^(\$default|ANY /\{proxy\+\}|ANY /api/\{proxy\+\}|ANY /)$' "$routes_file" > "$catchall_file"; then
+          if grep -E "$catchall_pattern" "$routes_file" > "$catchall_file"; then
             echo "Catch-all route keys present:"
             cat "$catchall_file"
             exit 1

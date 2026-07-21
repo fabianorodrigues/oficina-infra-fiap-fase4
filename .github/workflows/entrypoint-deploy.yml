@@ -313,7 +313,11 @@ jobs:
           for tg in $tgs; do
             states=$(aws elbv2 describe-target-health --target-group-arn "$tg" --query 'TargetHealthDescriptions[].TargetHealth.State' --output text)
             if [ -z "$states" ]; then unhealthy=$((unhealthy+1)); fi
-            for st in $states; do [ "$st" != "healthy" ] && unhealthy=$((unhealthy+1)) || true; done
+            for st in $states; do
+              if [ "$st" != "healthy" ]; then
+                unhealthy=$((unhealthy+1))
+              fi
+            done
           done
           test "$unhealthy" -eq 0
           echo "All targets healthy across $count target groups."
