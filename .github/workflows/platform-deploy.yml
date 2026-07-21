@@ -150,6 +150,11 @@ jobs:
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Validate IAM prerequisites
+        shell: pwsh
+        working-directory: terraform/platform
+        run: ../../scripts/validate-platform-iam-prerequisites.ps1 -PlanJsonPath tfplan.json
+
       - name: Terraform apply
         working-directory: terraform/platform
         run: terraform apply -input=false tfplan

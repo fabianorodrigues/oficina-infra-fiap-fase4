@@ -6,6 +6,11 @@ provider "aws" {
   }
 }
 
+provider "aws" {
+  alias  = "iam"
+  region = var.aws_region
+}
+
 data "aws_eks_cluster" "this" {
   name = aws_eks_cluster.this.name
 }

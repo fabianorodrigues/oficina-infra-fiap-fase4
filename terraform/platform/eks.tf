@@ -1,4 +1,6 @@
 resource "aws_iam_role" "eks_cluster" {
+  provider = aws.iam
+
   name = "${local.cluster_name}-eks-cluster"
 
   assume_role_policy = jsonencode({
