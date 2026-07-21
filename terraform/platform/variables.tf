@@ -44,3 +44,27 @@ variable "newrelic_chart_version" {
   type        = string
   default     = ""
 }
+
+variable "platform_iam_roles" {
+  description = "Optional existing IAM role ARNs for accounts where selected platform roles are provided outside Terraform."
+  type = object({
+    eks_cluster_role_arn              = optional(string, "")
+    eks_node_group_role_arn           = optional(string, "")
+    load_balancer_controller_role_arn = optional(string, "")
+    workload_role_arn                 = optional(string, "")
+  })
+  default  = {}
+  nullable = false
+
+  validation {
+    condition = alltrue([
+      for arn in [
+        var.platform_iam_roles.eks_cluster_role_arn,
+        var.platform_iam_roles.eks_node_group_role_arn,
+        var.platform_iam_roles.load_balancer_controller_role_arn,
+        var.platform_iam_roles.workload_role_arn
+      ] : can(regex("^arn:[^:]+:iam::[0-9]{12}:role/.+$", trimspace(arn))) if trimspace(arn) != ""
+    ])
+    error_message = "Each configured platform IAM role must be a valid IAM role ARN."
+  }
+}

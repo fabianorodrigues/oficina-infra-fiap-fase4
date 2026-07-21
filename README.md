@@ -135,7 +135,7 @@ O acoplamento entre repositórios é feito **por nome de parâmetro no SSM**. N�
 
 ## Configuração
 
-Configure em **Settings → Secrets and variables → Actions** do repositório.
+Configure em **Repository → Settings → Secrets and variables → Actions** do repositório.
 
 ### Secrets (obrigatórios)
 
@@ -149,10 +149,44 @@ Configure em **Settings → Secrets and variables → Actions** do repositório.
 |---|---|---|
 | `AWS_REGION` | **Sim** | Região de todos os recursos. Os workflows abortam se estiver vazia |
 | `TF_STATE_BUCKET` | Não | Apenas compatibilidade com um bucket de estado pré-existente |
+| `PLATFORM_IAM_ROLES_JSON` | Apenas quando a conta não puder criar ou alterar roles IAM | ARNs de roles IAM existentes que o Platform Deploy deve reutilizar |
+
+### Roles IAM externas
+
+Por padrão, o Terraform cria e administra as roles da plataforma. Em contas com IAM restrito, configure `PLATFORM_IAM_ROLES_JSON` como **Repository Variable** para reutilizar roles fornecidas pela conta. ARN de role não é secret.
+
+```json
+{
+  "eks_cluster_role_arn": "<ARN_DA_ROLE_DO_CLUSTER>",
+  "eks_node_group_role_arn": "<ARN_DA_ROLE_DO_NODE_GROUP>",
+  "load_balancer_controller_role_arn": "<ARN_DA_ROLE_DO_CONTROLLER>",
+  "workload_role_arn": "<ARN_DA_ROLE_COMPARTILHADA_DOS_WORKLOADS>"
+}
+```
+
+Campos ausentes são permitidos: quando um ARN não é informado, o Terraform tenta criar e administrar a role daquele componente.
+
+| Campo | Obrigatório quando | Componente | Trust esperado |
+|---|---|---|---|
+| `eks_cluster_role_arn` | A conta não puder criar/anexar a role do cluster | EKS cluster | `eks.amazonaws.com` com `sts:AssumeRole` |
+| `eks_node_group_role_arn` | A conta não puder criar/anexar a role dos nós | EKS node group | `ec2.amazonaws.com` com `sts:AssumeRole` |
+| `load_balancer_controller_role_arn` | A conta não puder criar/anexar a role do controller | AWS Load Balancer Controller | `pods.eks.amazonaws.com` com `sts:AssumeRole` e `sts:TagSession` |
+| `workload_role_arn` | A conta não puder criar/anexar as roles dos serviços | ServiceAccounts da aplicação e bootstrap | `pods.eks.amazonaws.com` com `sts:AssumeRole` e `sts:TagSession` |
+
+Obtenha o ARN de uma role existente com:
+
+```powershell
+aws iam get-role `
+  --role-name "<ROLE_NAME>" `
+  --query "Role.Arn" `
+  --output text
+```
+
+A role compartilhada de workloads simplifica a configuração, mas reduz o isolamento de permissões entre `cadastro-runtime`, `cadastro-migrator`, `estoque-runtime`, `estoque-migrator`, `ordens-runtime`, `ordens-migrator` e `db-bootstrap`. Ela precisa permitir a leitura dos segredos usados pelos pods e as ações SQS usadas pelos serviços. Caso os segredos usem chave KMS gerenciada pela conta, inclua também as permissões KMS necessárias.
 
 ### O que é provisionado automaticamente
 
-Toda a infraestrutura deste repositório é criada pelos workflows, e **todas as variáveis do Terraform têm valor padrão** — inclusive as versões dos charts Helm, que ficam em branco para que o Helm resolva a versão mais recente. Não há arquivo de variáveis a preencher.
+Toda a infraestrutura deste repositório é criada pelos workflows, e **todas as variáveis do Terraform têm valor padrão** — inclusive as roles IAM, quando a conta permite criá-las. As versões dos charts Helm ficam em branco para que o Helm resolva a versão mais recente. Não há arquivo de variáveis a preencher, exceto a Repository Variable opcional de roles externas.
 
 A forma dos recursos vem dos arquivos em `config/` (nomes, dimensionamento do node group, retenção do ECR, tempos das filas, rotas da API), versionados junto ao código. Ajustes de plataforma são feitos por pull request nesses arquivos, não por variables do GitHub.
 
@@ -168,7 +202,7 @@ Todos os workflows rodam apenas na branch `main` e exigem uma string de confirma
 
 **Actions → Platform Deploy → Run workflow → `confirmation` = `APPLY`**
 
-Verifica o bucket de estado e os parâmetros da etapa 1 → valida o plano → aplica → aguarda o cluster e os nós ficarem ativos → confere addons e releases Helm. Um passo de segurança **interrompe o deploy se o plano previr exclusão** de cluster, node group, repositório de imagem, fila, papel IAM, parâmetro ou segredo.
+Verifica o bucket de estado e os parâmetros da etapa 1 → valida o plano → aplica → aguarda o cluster e os nós ficarem ativos → confere addons e releases Helm. Um passo de segurança **interrompe o deploy se o plano previr exclusão ou substituição** de cluster, node group, repositório de imagem, fila, papel IAM, parâmetro ou segredo.
 
 Duração típica: 20 a 35 minutos, dominada pela criação do cluster.
 
