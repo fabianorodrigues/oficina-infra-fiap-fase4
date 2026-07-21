@@ -129,9 +129,9 @@ jobs:
         working-directory: terraform/platform
         run: terraform validate
 
-      - name: Terraform providers (platform)
+      - name: Terraform selected providers (platform)
         working-directory: terraform/platform
-        run: terraform providers
+        run: terraform version
 
       - name: TFLint (platform)
         working-directory: terraform/platform
@@ -158,9 +158,9 @@ jobs:
         working-directory: terraform/entrypoint
         run: terraform validate
 
-      - name: Terraform providers (entrypoint)
+      - name: Terraform selected providers (entrypoint)
         working-directory: terraform/entrypoint
-        run: terraform providers
+        run: terraform version
 
       - name: TFLint (entrypoint)
         working-directory: terraform/entrypoint
