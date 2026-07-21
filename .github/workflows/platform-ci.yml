@@ -83,6 +83,7 @@ jobs:
         run: |
           $scripts = @(
             'scripts/validate-platform-config.ps1',
+            'scripts/validate-platform-iam-prerequisites.ps1',
             'scripts/validate-platform.ps1',
             'scripts/validate-entrypoint-config.ps1',
             'scripts/validate-route-contract.ps1',

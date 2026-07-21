@@ -67,12 +67,16 @@ data "aws_iam_policy_document" "workload_permissions" {
 resource "aws_iam_role" "workload" {
   for_each = local.workload_service_accounts
 
+  provider = aws.iam
+
   name               = "${local.cluster_name}-${each.key}"
   assume_role_policy = local.workload_mode == "pod-identity" ? data.aws_iam_policy_document.workload_pod_identity_assume.json : data.aws_iam_policy_document.workload_irsa_assume[each.key].json
 }
 
 resource "aws_iam_policy" "workload" {
   for_each = local.workload_service_accounts
+
+  provider = aws.iam
 
   name   = "${local.cluster_name}-${each.key}"
   policy = data.aws_iam_policy_document.workload_permissions[each.key].json
@@ -380,11 +384,15 @@ data "aws_iam_policy_document" "load_balancer_controller" {
 }
 
 resource "aws_iam_role" "load_balancer_controller" {
+  provider = aws.iam
+
   name               = "${local.cluster_name}-aws-load-balancer-controller"
   assume_role_policy = local.workload_mode == "pod-identity" ? data.aws_iam_policy_document.workload_pod_identity_assume.json : data.aws_iam_policy_document.addon_irsa_assume["aws-load-balancer-controller"].json
 }
 
 resource "aws_iam_policy" "load_balancer_controller" {
+  provider = aws.iam
+
   name   = "${local.cluster_name}-aws-load-balancer-controller"
   policy = data.aws_iam_policy_document.load_balancer_controller.json
 }

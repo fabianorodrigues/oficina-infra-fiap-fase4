@@ -1,4 +1,6 @@
 resource "aws_iam_role" "node_group" {
+  provider = aws.iam
+
   name = "${local.cluster_name}-node-group"
 
   assume_role_policy = jsonencode({
