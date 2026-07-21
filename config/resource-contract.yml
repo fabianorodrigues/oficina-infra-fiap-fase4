@@ -1,0 +1,46 @@
+inputs:
+  vpcId: /oficina/infra/vpc/id
+  publicSubnet1: /oficina/infra/subnets/public/1
+  publicSubnet2: /oficina/infra/subnets/public/2
+  privateSubnet1: /oficina/infra/subnets/private/1
+  privateSubnet2: /oficina/infra/subnets/private/2
+  rdsSecurityGroupId: /oficina/infra/rds/security-group-id
+  rdsMasterSecretArn: /oficina/infra/rds/master-secret-arn
+
+outputs:
+  clusterName: /oficina/infra/cluster/name
+  clusterNamespace: /oficina/infra/cluster/namespace
+  clusterArn: /oficina/infra/cluster/arn
+  clusterEndpoint: /oficina/infra/cluster/endpoint
+  clusterSecurityGroupId: /oficina/infra/cluster/security-group-id
+
+  cadastroEcr: /oficina/infra/ecr/cadastro
+  estoqueEcr: /oficina/infra/ecr/estoque
+  ordensEcr: /oficina/infra/ecr/ordens
+
+  estoqueCommandQueueUrl: /oficina/infra/sqs/estoque-comandos/url
+  estoqueCommandQueueArn: /oficina/infra/sqs/estoque-comandos/arn
+  estoqueCommandDlqUrl: /oficina/infra/sqs/estoque-comandos-dlq/url
+  estoqueCommandDlqArn: /oficina/infra/sqs/estoque-comandos-dlq/arn
+
+  ordensEventQueueUrl: /oficina/infra/sqs/ordens-eventos/url
+  ordensEventQueueArn: /oficina/infra/sqs/ordens-eventos/arn
+  ordensEventDlqUrl: /oficina/infra/sqs/ordens-eventos-dlq/url
+  ordensEventDlqArn: /oficina/infra/sqs/ordens-eventos-dlq/arn
+
+  apiId: /oficina/infra/api/id
+  apiUrl: /oficina/infra/api/url
+  apiExecutionArn: /oficina/infra/api/execution-arn
+  apiStage: /oficina/infra/api/stage
+  vpcLinkId: /oficina/infra/api/vpc-link-id
+
+secrets:
+  cadastroRuntimeDb: /oficina/cadastro/runtime-db
+  cadastroMigrationDb: /oficina/cadastro/migration-db
+  estoqueRuntimeDb: /oficina/estoque/runtime-db
+  estoqueMigrationDb: /oficina/estoque/migration-db
+  ordensRuntimeDb: /oficina/ordens/runtime-db
+  ordensMigrationDb: /oficina/ordens/migration-db
+  authDatabase: /oficina/auth/database
+  authJwt: /oficina/auth/jwt
+  newRelic: /oficina/observability/new-relic

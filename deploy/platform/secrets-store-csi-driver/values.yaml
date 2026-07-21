@@ -1,0 +1,8 @@
+syncSecret:
+  enabled: false
+enableSecretRotation: true
+rotationPollInterval: 2m
+linux:
+  metricsAddr: ":8095"
+windows:
+  enabled: false

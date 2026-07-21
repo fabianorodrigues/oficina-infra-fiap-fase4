@@ -1,0 +1,8 @@
+aws_region = "us-east-1"
+
+# Keep this aligned with terraform/platform/iam.tf.
+load_balancer_controller_chart_version = "3.4.1"
+secrets_store_csi_driver_chart_version = ""
+ascp_chart_version                     = ""
+opentelemetry_collector_chart_version  = ""
+newrelic_chart_version                 = ""
