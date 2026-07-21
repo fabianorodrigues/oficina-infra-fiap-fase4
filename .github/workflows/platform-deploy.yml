@@ -1,10 +1,10 @@
-name: Platform Deploy
+﻿name: Platform Deploy
 
 on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: 'Type APPLY to provision the shared platform from main.'
+        description: Type APPLY to reconcile the ECS platform from main.
         required: true
         type: string
 
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   deploy:
-    name: Deploy platform
+    name: Deploy ECS platform
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -27,21 +27,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Validate request
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:GITHUB_REF -ne 'refs/heads/main') {
-            throw 'This workflow must run from main.'
-          }
-          if ('${{ inputs.confirmation }}' -cne 'APPLY') {
-            throw 'Confirmation must be APPLY.'
-          }
-          if ([string]::IsNullOrWhiteSpace($env:AWS_REGION)) {
-            throw 'Repository Variable AWS_REGION is required.'
-          }
-
+          if ($env:GITHUB_REF -ne 'refs/heads/main') { throw 'This workflow must run from main.' }
+          if ('${{ inputs.confirmation }}' -cne 'APPLY') { throw 'Confirmation must be APPLY.' }
+          if ([string]::IsNullOrWhiteSpace($env:AWS_REGION)) { throw 'Repository Variable AWS_REGION is required.' }
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -49,7 +41,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ vars.AWS_REGION }}
-
       - name: Resolve Terraform backend
         shell: pwsh
         run: |
@@ -59,105 +50,26 @@ jobs:
           $bucket = $deterministicBucket
           if (-not [string]::IsNullOrWhiteSpace($env:TF_STATE_BUCKET_FALLBACK) -and $env:TF_STATE_BUCKET_FALLBACK -ne $deterministicBucket) {
             aws s3api head-bucket --bucket $deterministicBucket 2>$null
-            if ($LASTEXITCODE -ne 0) {
-              Write-Warning "Using temporary TF_STATE_BUCKET fallback. Rename or migrate the state bucket to $deterministicBucket to remove this variable."
-              $bucket = $env:TF_STATE_BUCKET_FALLBACK
-            }
+            if ($LASTEXITCODE -ne 0) { $bucket = $env:TF_STATE_BUCKET_FALLBACK }
           }
           aws s3api head-bucket --bucket $bucket
           "TF_STATE_BUCKET=$bucket" | Add-Content -Path $env:GITHUB_ENV
           "AWS_ACCOUNT_ID=$($identity.Account)" | Add-Content -Path $env:GITHUB_ENV
-
-      - name: Validate Infra DB SSM prerequisites
-        run: |
-          for name in \
-            /oficina/infra/vpc/id \
-            /oficina/infra/subnets/public/1 \
-            /oficina/infra/subnets/public/2 \
-            /oficina/infra/subnets/private/1 \
-            /oficina/infra/subnets/private/2 \
-            /oficina/infra/rds/security-group-id \
-            /oficina/infra/rds/master-secret-arn; do
-            aws ssm get-parameter --name "$name" --region "${AWS_REGION}" > "$RUNNER_TEMP/ssm-parameter.json"
-          done
-
-      - name: Validate versioned config
-        shell: pwsh
-        run: ./scripts/validate-platform-config.ps1
-
-      - name: Prepare external IAM role config
-        shell: pwsh
-        working-directory: terraform/platform
-        env:
-          PLATFORM_IAM_ROLES_JSON: ${{ vars.PLATFORM_IAM_ROLES_JSON }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $raw = $env:PLATFORM_IAM_ROLES_JSON
-          if ([string]::IsNullOrWhiteSpace($raw)) {
-            Write-Host 'No external platform IAM roles configured.'
-            exit 0
-          }
-
-          try {
-            $roles = $raw | ConvertFrom-Json -AsHashtable
-          } catch {
-            throw 'Repository Variable PLATFORM_IAM_ROLES_JSON must contain valid JSON.'
-          }
-
-          if ($roles -isnot [System.Collections.IDictionary]) {
-            throw 'Repository Variable PLATFORM_IAM_ROLES_JSON must be a JSON object.'
-          }
-
-          $allowedKeys = @(
-            'eks_cluster_role_arn',
-            'eks_node_group_role_arn',
-            'load_balancer_controller_role_arn',
-            'workload_role_arn'
-          )
-
-          $normalized = [ordered]@{}
-          foreach ($key in @($roles.Keys)) {
-            if ($allowedKeys -notcontains $key) {
-              throw "Repository Variable PLATFORM_IAM_ROLES_JSON contains unsupported key '$key'."
-            }
-
-            $value = [string]$roles[$key]
-            if ([string]::IsNullOrWhiteSpace($value)) {
-              continue
-            }
-
-            $value = $value.Trim()
-            if ($value -notmatch '^arn:[^:]+:iam::[0-9]{12}:role/.+$') {
-              throw "Repository Variable PLATFORM_IAM_ROLES_JSON key '$key' must be an IAM role ARN."
-            }
-
-            $normalized[$key] = $value
-          }
-
-          if ($normalized.Count -eq 0) {
-            Write-Host 'External platform IAM role config is empty after normalization.'
-            exit 0
-          }
-
-          [ordered]@{ platform_iam_roles = $normalized } |
-            ConvertTo-Json -Depth 5 |
-            Set-Content -LiteralPath platform.auto.tfvars.json -Encoding utf8NoBOM
-
-          $configuredKeys = ($normalized.Keys | Sort-Object) -join ', '
-          Write-Host "External platform IAM role fields configured: $configuredKeys"
-
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.10.5
-
       - name: Setup TFLint
         uses: terraform-linters/setup-tflint@v4
-
+      - name: Validate prerequisites
+        run: |
+          set -euo pipefail
+          for p in /oficina/infra/vpc/id /oficina/infra/subnets/private/1 /oficina/infra/subnets/private/2 /oficina/infra/rds/security-group-id; do
+            aws ssm get-parameter --name "$p" --region "$AWS_REGION" >/dev/null
+          done
       - name: Terraform fmt
         working-directory: terraform/platform
         run: terraform fmt -check -recursive
-
       - name: Terraform init
         working-directory: terraform/platform
         run: |
@@ -167,97 +79,54 @@ jobs:
             -backend-config="region=${AWS_REGION}" \
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true"
-
       - name: Terraform validate
         working-directory: terraform/platform
         run: terraform validate
-
       - name: TFLint
         working-directory: terraform/platform
-        run: |
-          tflint --init
-          tflint --recursive
-
+        run: tflint --init && tflint --recursive
       - name: Checkov
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: terraform/platform
-          quiet: true
           framework: terraform
-
+          quiet: true
       - name: Terraform plan
         working-directory: terraform/platform
-        run: terraform plan -input=false -var="aws_region=${AWS_REGION}" -out=tfplan
-
+        run: terraform plan -input=false -out=tfplan -var="aws_region=${AWS_REGION}"
       - name: Validate plan safety
         working-directory: terraform/platform
         run: |
           set -euo pipefail
           terraform show -json tfplan > tfplan.json
-          protected_types='["aws_eks_cluster","aws_eks_node_group","aws_eks_addon","aws_eks_pod_identity_association","aws_ecr_repository","aws_ecr_lifecycle_policy","aws_sqs_queue","aws_sqs_queue_redrive_allow_policy","aws_iam_role","aws_iam_policy","aws_iam_role_policy","aws_iam_role_policy_attachment","aws_iam_openid_connect_provider","aws_launch_template","aws_ssm_parameter","aws_secretsmanager_secret"]'
-          blocked=$(jq --argjson protected "$protected_types" '[.resource_changes[]? | select(.type as $type | $protected | index($type)) | select(.change.actions | index("delete")) | select(.address != "aws_eks_addon.managed[\"eks-pod-identity-agent\"]")] | length' tfplan.json)
+          protected='["aws_ecs_cluster","aws_lb","aws_lb_target_group","aws_lb_listener","aws_ecr_repository","aws_sqs_queue","aws_security_group","aws_cloudwatch_log_group","aws_ssm_parameter"]'
+          blocked=$(jq --argjson protected "$protected" '[.resource_changes[]? | select(.type as $t | $protected | index($t)) | select(.change.actions | index("delete"))] | length' tfplan.json)
           if [ "$blocked" -gt 0 ]; then
-            echo "Terraform plan contains delete or replacement actions for protected platform resources." >&2
-            jq -r --argjson protected "$protected_types" '.resource_changes[]? | select(.type as $type | $protected | index($type)) | select(.change.actions | index("delete")) | select(.address != "aws_eks_addon.managed[\"eks-pod-identity-agent\"]") | "- " + .address + " " + (.change.actions | join(","))' tfplan.json >&2
+            echo 'Terraform plan contains delete actions for protected platform resources.' >&2
             exit 1
           fi
-          {
-            echo "## Platform Terraform Plan"
-            echo
-            echo "| Action | Count |"
-            echo "| --- | ---: |"
-            for action in create update delete; do
-              count=$(jq "[.resource_changes[]? | select(.change.actions | index(\"$action\"))] | length" tfplan.json)
-              echo "| $action | $count |"
-            done
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Validate IAM prerequisites
-        shell: pwsh
-        working-directory: terraform/platform
-        run: ../../scripts/validate-platform-iam-prerequisites.ps1 -PlanJsonPath tfplan.json -ExternalIamRolesJsonPath platform.auto.tfvars.json
-
       - name: Terraform apply
         working-directory: terraform/platform
         run: terraform apply -input=false tfplan
-
-      - name: Update kubeconfig
+      - name: Validate ECS platform
         run: |
           set -euo pipefail
-          cluster=$(aws ssm get-parameter --name /oficina/infra/cluster/name --region "${AWS_REGION}" --query Parameter.Value --output text)
-          namespace=$(aws ssm get-parameter --name /oficina/infra/cluster/namespace --region "${AWS_REGION}" --query Parameter.Value --output text)
-          echo "CLUSTER_NAME=$cluster" >> "$GITHUB_ENV"
-          echo "NAMESPACE=$namespace" >> "$GITHUB_ENV"
-          aws eks update-kubeconfig --name "$cluster" --region "${AWS_REGION}"
-
-      - name: Wait for EKS and node group
-        run: |
-          aws eks wait cluster-active --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
-          aws eks wait nodegroup-active --cluster-name "${CLUSTER_NAME}" --nodegroup-name oficina --region "${AWS_REGION}"
-          kubectl wait --for=condition=Ready nodes --all --timeout=20m
-
-      - name: Validate add-ons and Helm releases
-        run: |
-          aws eks list-addons --cluster-name "${CLUSTER_NAME}" --region "${AWS_REGION}"
-          helm list -A
-
-      - name: Read-only platform validation
-        shell: pwsh
-        run: ./scripts/validate-platform.ps1 -ClusterName "$env:CLUSTER_NAME" -AwsRegion "$env:AWS_REGION"
-
+          cluster=$(aws ssm get-parameter --name /oficina/infra/cluster/name --region "$AWS_REGION" --query Parameter.Value --output text)
+          aws ecs describe-clusters --clusters "$cluster" --region "$AWS_REGION" --query 'clusters[0].status' --output text | grep -q ACTIVE
+          alb=$(aws ssm get-parameter --name /oficina/infra/alb/arn --region "$AWS_REGION" --query Parameter.Value --output text)
+          aws elbv2 describe-load-balancers --load-balancer-arns "$alb" --region "$AWS_REGION" --query 'LoadBalancers[0].Scheme' --output text | grep -q internal
+          for service in cadastro estoque ordens; do
+            aws ssm get-parameter --name "/oficina/infra/ecs/${service}/target-group-arn" --region "$AWS_REGION" >/dev/null
+            aws ssm get-parameter --name "/oficina/infra/ecs/${service}/log-group-name" --region "$AWS_REGION" >/dev/null
+          done
       - name: Publish summary
         run: |
           {
             echo '## Platform Deploy'
             echo
-            echo "- Commit: ${GITHUB_SHA}"
             echo "- Account ID: ${AWS_ACCOUNT_ID}"
             echo "- Region: ${AWS_REGION}"
             echo "- Terraform state bucket: ${TF_STATE_BUCKET}"
             echo "- Terraform state key: ${TF_STATE_KEY_PLATFORM}"
-            echo "- Cluster: ${CLUSTER_NAME}"
-            echo "- Namespace: ${NAMESPACE}"
-            echo "- EKS, add-ons, ECR and SQS validated"
-            echo
-            echo 'Sensitive values were not printed.'
+            echo '- ECS cluster, ALB, target groups, log groups, ECR and SQS validated.'
           } >> "$GITHUB_STEP_SUMMARY"

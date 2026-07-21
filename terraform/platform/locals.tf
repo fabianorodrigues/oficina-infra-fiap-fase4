@@ -2,28 +2,15 @@ locals {
   official          = yamldecode(file("${path.module}/../../config/official.yml"))
   resource_contract = yamldecode(file("${path.module}/../../config/resource-contract.yml"))
 
-  project_name     = local.official.project.name
-  cluster_name     = local.official.cluster.name
-  namespace        = local.official.cluster.namespace
-  enable_new_relic = local.official.observability.enableNewRelic
-
-  platform_iam_roles = {
-    eks_cluster_role_arn              = trimspace(var.platform_iam_roles.eks_cluster_role_arn)
-    eks_node_group_role_arn           = trimspace(var.platform_iam_roles.eks_node_group_role_arn)
-    load_balancer_controller_role_arn = trimspace(var.platform_iam_roles.load_balancer_controller_role_arn)
-    workload_role_arn                 = trimspace(var.platform_iam_roles.workload_role_arn)
-  }
-
-  use_external_cluster_role                  = local.platform_iam_roles.eks_cluster_role_arn != ""
-  use_external_node_group_role               = local.platform_iam_roles.eks_node_group_role_arn != ""
-  use_external_load_balancer_controller_role = local.platform_iam_roles.load_balancer_controller_role_arn != ""
-  use_external_workload_role                 = local.platform_iam_roles.workload_role_arn != ""
-  use_pod_identity_agent                     = local.use_external_load_balancer_controller_role || local.use_external_workload_role
+  project_name   = local.official.project.name
+  cluster_name   = local.official.ecs.name
+  container_port = local.official.ecs.containerPort
 
   ecr_repositories = {
-    cadastro = local.official.ecr.cadastro
-    estoque  = local.official.ecr.estoque
-    ordens   = local.official.ecr.ordens
+    cadastro     = local.official.ecr.cadastro
+    estoque      = local.official.ecr.estoque
+    ordens       = local.official.ecr.ordens
+    db_bootstrap = local.official.ecr.dbBootstrap
   }
 
   sqs_queues = {
@@ -37,93 +24,48 @@ locals {
     }
   }
 
-  secret_names = {
-    cadastro_runtime  = local.resource_contract.secrets.cadastroRuntimeDb
-    cadastro_migrator = local.resource_contract.secrets.cadastroMigrationDb
-    estoque_runtime   = local.resource_contract.secrets.estoqueRuntimeDb
-    estoque_migrator  = local.resource_contract.secrets.estoqueMigrationDb
-    ordens_runtime    = local.resource_contract.secrets.ordensRuntimeDb
-    ordens_migrator   = local.resource_contract.secrets.ordensMigrationDb
-    auth_database     = local.resource_contract.secrets.authDatabase
-    new_relic         = local.resource_contract.secrets.newRelic
-  }
-
-  workload_service_accounts = {
-    cadastro-runtime = {
-      secret_names = [local.secret_names.cadastro_runtime]
-      sqs_receive  = []
-      sqs_send     = []
+  services = {
+    cadastro = {
+      name              = local.official.services.cadastro.name
+      target_group_name = local.official.services.cadastro.targetGroupName
+      log_group_name    = local.official.services.cadastro.logGroupName
+      path_patterns     = ["/api/clientes", "/api/clientes/*", "/api/veiculos", "/api/veiculos/*", "/api/servicos", "/api/servicos/*", "/api/admin/funcionarios", "/api/admin/funcionarios/*", "/api/internal/clientes", "/api/internal/clientes/*", "/api/internal/veiculos", "/api/internal/veiculos/*", "/api/internal/servicos", "/api/internal/servicos/*"]
+      health_target     = "cadastro"
+      priority_base     = 100
     }
-    cadastro-migrator = {
-      secret_names = [local.secret_names.cadastro_migrator]
-      sqs_receive  = []
-      sqs_send     = []
+    estoque = {
+      name              = local.official.services.estoque.name
+      target_group_name = local.official.services.estoque.targetGroupName
+      log_group_name    = local.official.services.estoque.logGroupName
+      path_patterns     = ["/api/estoque", "/api/estoque/*", "/api/insumos", "/api/insumos/*", "/api/pecas", "/api/pecas/*", "/api/internal/estoque", "/api/internal/estoque/*", "/api/internal/materiais", "/api/internal/materiais/*"]
+      health_target     = "estoque"
+      priority_base     = 200
     }
-    estoque-runtime = {
-      secret_names = [local.secret_names.estoque_runtime]
-      sqs_receive  = ["estoque_comandos"]
-      sqs_send     = ["ordens_eventos", "estoque_comandos_dlq"]
-    }
-    estoque-migrator = {
-      secret_names = [local.secret_names.estoque_migrator]
-      sqs_receive  = []
-      sqs_send     = []
-    }
-    ordens-runtime = {
-      secret_names = [local.secret_names.ordens_runtime]
-      sqs_receive  = ["ordens_eventos"]
-      sqs_send     = ["estoque_comandos", "ordens_eventos_dlq"]
-    }
-    ordens-migrator = {
-      secret_names = [local.secret_names.ordens_migrator]
-      sqs_receive  = []
-      sqs_send     = []
-    }
-    db-bootstrap = {
-      secret_names = [
-        local.resource_contract.inputs.rdsMasterSecretArn,
-        local.secret_names.cadastro_runtime,
-        local.secret_names.cadastro_migrator,
-        local.secret_names.estoque_runtime,
-        local.secret_names.estoque_migrator,
-        local.secret_names.ordens_runtime,
-        local.secret_names.ordens_migrator,
-        local.secret_names.auth_database
-      ]
-      sqs_receive = []
-      sqs_send    = []
+    ordens = {
+      name              = local.official.services.ordens.name
+      target_group_name = local.official.services.ordens.targetGroupName
+      log_group_name    = local.official.services.ordens.logGroupName
+      path_patterns     = ["/api/ordens-servico", "/api/ordens-servico/*", "/api/minhas-ordens-servico", "/api/minhas-ordens-servico/*", "/api/orcamentos", "/api/orcamentos/*", "/api/meus-orcamentos", "/api/meus-orcamentos/*", "/api/relatorios", "/api/relatorios/*", "/api/webhooks/payments", "/api/webhooks/payments/*"]
+      health_target     = "ordens"
+      priority_base     = 300
     }
   }
 
-  addon_names = toset(concat(
-    [
-      "vpc-cni",
-      "coredns",
-      "kube-proxy"
-    ],
-    local.use_pod_identity_agent ? ["eks-pod-identity-agent"] : []
-  ))
+  service_path_rules = merge([
+    for service_key, service in local.services : {
+      for idx, pattern in service.path_patterns : "${service_key}-${idx}" => {
+        service_key  = service_key
+        path_pattern = pattern
+        priority     = service.priority_base + 10 + idx
+      }
+    }
+  ]...)
+
+  rds_port = 1433
 
   common_tags = {
     Project    = local.project_name
     ManagedBy  = "terraform"
     Repository = "oficina-infra-fiap-fase4"
-  }
-
-  eks_cluster_role_arn = (
-    local.use_external_cluster_role
-    ? local.platform_iam_roles.eks_cluster_role_arn
-    : aws_iam_role.eks_cluster[0].arn
-  )
-
-  eks_node_group_role_arn = (
-    local.use_external_node_group_role
-    ? local.platform_iam_roles.eks_node_group_role_arn
-    : aws_iam_role.node_group[0].arn
-  )
-
-  workload_role_arn_by_service_account = {
-    for key in keys(local.workload_service_accounts) : key => local.platform_iam_roles.workload_role_arn
-    if local.use_external_workload_role
   }
 }

@@ -15,9 +15,9 @@ data "aws_ssm_parameter" "private_subnet_2" {
   name = local.entrypoint.vpcLink.privateSubnet2Parameter
 }
 
-# --- Internal ALB (Ingress, applied earlier in the same Entrypoint Deploy run) ----
-# Discovered by name and port instead of an SSM handoff, since both the Ingress
-# apply and this Terraform run happen in the same workflow.
+# --- Internal ALB (Platform stack) -----------------------------------------
+# The platform stack creates the private ALB and listener consumed by the VPC
+# Link integration.
 data "aws_lb" "internal" {
   name = local.entrypoint.vpcLink.albName
 }
