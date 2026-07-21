@@ -6,3 +6,12 @@ secrets_store_csi_driver_chart_version = ""
 ascp_chart_version                     = ""
 opentelemetry_collector_chart_version  = ""
 newrelic_chart_version                 = ""
+
+# Optional: set only when the target account provides IAM roles outside Terraform.
+# Omit any field that Terraform should create and manage.
+# platform_iam_roles = {
+#   eks_cluster_role_arn              = "arn:aws:iam::123456789012:role/example-eks-cluster"
+#   eks_node_group_role_arn           = "arn:aws:iam::123456789012:role/example-eks-node-group"
+#   load_balancer_controller_role_arn = "arn:aws:iam::123456789012:role/example-load-balancer-controller"
+#   workload_role_arn                 = "arn:aws:iam::123456789012:role/example-platform-workloads"
+# }

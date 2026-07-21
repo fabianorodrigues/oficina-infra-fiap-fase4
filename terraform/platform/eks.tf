@@ -1,4 +1,6 @@
 resource "aws_iam_role" "eks_cluster" {
+  count = local.use_external_cluster_role ? 0 : 1
+
   provider = aws.iam
 
   name = "${local.cluster_name}-eks-cluster"
@@ -16,7 +18,9 @@ resource "aws_iam_role" "eks_cluster" {
 }
 
 resource "aws_iam_role_policy_attachment" "eks_cluster" {
-  role       = aws_iam_role.eks_cluster.name
+  count = local.use_external_cluster_role ? 0 : 1
+
+  role       = aws_iam_role.eks_cluster[0].name
   policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/AmazonEKSClusterPolicy"
 }
 
@@ -26,7 +30,7 @@ resource "aws_eks_cluster" "this" {
   #checkov:skip=CKV_AWS_58:EKS 1.28+ encrypts Kubernetes API data by default; explicit lower versions are blocked by platform config validation.
 
   name     = local.cluster_name
-  role_arn = aws_iam_role.eks_cluster.arn
+  role_arn = local.eks_cluster_role_arn
   version  = trimspace(local.official.cluster.kubernetesVersion) == "" ? null : local.official.cluster.kubernetesVersion
 
   enabled_cluster_log_types = var.cluster_enabled_log_types

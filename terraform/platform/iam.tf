@@ -65,7 +65,7 @@ data "aws_iam_policy_document" "workload_permissions" {
 }
 
 resource "aws_iam_role" "workload" {
-  for_each = local.workload_service_accounts
+  for_each = local.use_external_workload_role ? {} : local.workload_service_accounts
 
   provider = aws.iam
 
@@ -74,7 +74,7 @@ resource "aws_iam_role" "workload" {
 }
 
 resource "aws_iam_policy" "workload" {
-  for_each = local.workload_service_accounts
+  for_each = local.use_external_workload_role ? {} : local.workload_service_accounts
 
   provider = aws.iam
 
@@ -83,7 +83,7 @@ resource "aws_iam_policy" "workload" {
 }
 
 resource "aws_iam_role_policy_attachment" "workload" {
-  for_each = local.workload_service_accounts
+  for_each = local.use_external_workload_role ? {} : local.workload_service_accounts
 
   role       = aws_iam_role.workload[each.key].name
   policy_arn = aws_iam_policy.workload[each.key].arn
@@ -96,7 +96,7 @@ resource "kubernetes_service_account" "workload" {
     name      = each.key
     namespace = kubernetes_namespace.oficina.metadata[0].name
     annotations = local.workload_mode == "irsa" ? {
-      "eks.amazonaws.com/role-arn" = aws_iam_role.workload[each.key].arn
+      "eks.amazonaws.com/role-arn" = local.workload_role_arn_by_service_account[each.key]
     } : {}
   }
 }
@@ -384,6 +384,8 @@ data "aws_iam_policy_document" "load_balancer_controller" {
 }
 
 resource "aws_iam_role" "load_balancer_controller" {
+  count = local.use_external_load_balancer_controller_role ? 0 : 1
+
   provider = aws.iam
 
   name               = "${local.cluster_name}-aws-load-balancer-controller"
@@ -391,6 +393,8 @@ resource "aws_iam_role" "load_balancer_controller" {
 }
 
 resource "aws_iam_policy" "load_balancer_controller" {
+  count = local.use_external_load_balancer_controller_role ? 0 : 1
+
   provider = aws.iam
 
   name   = "${local.cluster_name}-aws-load-balancer-controller"
@@ -398,8 +402,10 @@ resource "aws_iam_policy" "load_balancer_controller" {
 }
 
 resource "aws_iam_role_policy_attachment" "load_balancer_controller" {
-  role       = aws_iam_role.load_balancer_controller.name
-  policy_arn = aws_iam_policy.load_balancer_controller.arn
+  count = local.use_external_load_balancer_controller_role ? 0 : 1
+
+  role       = aws_iam_role.load_balancer_controller[0].name
+  policy_arn = aws_iam_policy.load_balancer_controller[0].arn
 }
 
 resource "kubernetes_service_account" "load_balancer_controller" {
@@ -407,7 +413,7 @@ resource "kubernetes_service_account" "load_balancer_controller" {
     name      = "aws-load-balancer-controller"
     namespace = "kube-system"
     annotations = local.workload_mode == "irsa" ? {
-      "eks.amazonaws.com/role-arn" = aws_iam_role.load_balancer_controller.arn
+      "eks.amazonaws.com/role-arn" = local.load_balancer_controller_role_arn
     } : {}
   }
 

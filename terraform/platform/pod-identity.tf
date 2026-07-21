@@ -4,7 +4,7 @@ resource "aws_eks_pod_identity_association" "workload" {
   cluster_name    = aws_eks_cluster.this.name
   namespace       = local.namespace
   service_account = each.key
-  role_arn        = aws_iam_role.workload[each.key].arn
+  role_arn        = local.workload_role_arn_by_service_account[each.key]
 
   depends_on = [
     aws_eks_addon.managed,
@@ -18,7 +18,7 @@ resource "aws_eks_pod_identity_association" "load_balancer_controller" {
   cluster_name    = aws_eks_cluster.this.name
   namespace       = "kube-system"
   service_account = kubernetes_service_account.load_balancer_controller.metadata[0].name
-  role_arn        = aws_iam_role.load_balancer_controller.arn
+  role_arn        = local.load_balancer_controller_role_arn
 
   depends_on = [
     aws_eks_addon.managed,
