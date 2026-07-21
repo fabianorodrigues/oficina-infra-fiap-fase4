@@ -8,8 +8,7 @@
 
 solution:
   name: oficina
-  cluster: oficina
-  namespace: oficina
+  ecsCluster: oficina
 
 repositories:
   cadastro:
@@ -43,11 +42,11 @@ queues:
 entrypoint:
   apiGateway: oficina-api
   loadBalancer: oficina
-  ingress: oficina
   vpcLink: oficina
 
 database:
   engine: SQL Server (RDS)
+  bootstrapImage: oficina-db-bootstrap
   logicalDatabases:
     - OficinaCadastroDb
     - OficinaEstoqueDb

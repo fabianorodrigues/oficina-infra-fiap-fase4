@@ -46,14 +46,11 @@ locals {
     { "overwrite:header.${local.request_id_header}" = local.request_id_source },
   )
 
-  # ALB frontend security group resolution. The AWS Load Balancer Controller may
-  # attach a shared backend security group (tagged elbv2.k8s.aws/resource=backend-sg)
-  # in addition to the per-LB frontend security group. We add the VPC Link ingress
-  # rule only to the frontend group. If auto-detection is ambiguous, the plan fails
-  # and var.alb_frontend_security_group_id must be set explicitly.
+  # ALB security group resolution. The platform owns one internal ALB security
+  # group and publishes the ALB name; if the data source ever returns more than
+  # one group, set var.alb_frontend_security_group_id explicitly.
   alb_frontend_sg_candidates = [
     for id, sg in data.aws_security_group.alb : id
-    if lookup(sg.tags, "elbv2.k8s.aws/resource", "") != "backend-sg"
   ]
   alb_frontend_sg_id = (
     var.alb_frontend_security_group_id != "" ? var.alb_frontend_security_group_id :

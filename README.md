@@ -45,11 +45,11 @@ A **Oficina** é uma plataforma de gestão de oficina mecânica distribuída em 
 |---|---|
 | **EKS** | Cluster e namespace da aplicação, com logs de painel de controle habilitados |
 | **Node group** | Grupo gerenciado em subnets privadas, sob demanda, escala de 1 a 2 nós |
-| **Addons** | VPC CNI, CoreDNS, kube-proxy e agente de Pod Identity |
+| **Addons** | VPC CNI, CoreDNS e kube-proxy; agente de Pod Identity somente quando houver role específica opcional |
 | **Helm** | Controlador de balanceador, driver CSI de segredos e o provedor AWS do CSI |
 | **ECR** | 3 repositórios de imagem, com tags imutáveis, varredura ao enviar e retenção das 20 últimas |
 | **SQS** | 4 filas FIFO — comandos e eventos, cada uma com sua fila de mensagens mortas |
-| **IAM** | Papéis, políticas e associações de Pod Identity para cada carga de trabalho |
+| **IAM** | Roles externas para cluster e node group; controller e workloads usam credenciais da node role |
 
 ### Stack `entrypoint` — etapa 6
 
@@ -73,16 +73,17 @@ flowchart TB
     subgraph EKS["Cluster EKS"]
         direction TB
         NG["Node group gerenciado<br/>subnets privadas, 1 a 2 nós"]
-        Addons["Addons<br/>CNI, CoreDNS, kube-proxy, Pod Identity"]
+        Addons["Addons<br/>CNI, CoreDNS, kube-proxy"]
         Helm["Helm<br/>controlador de balanceador + CSI de segredos"]
     end
 
     ECR["ECR<br/>cadastro · estoque · ordens"]
     SQS["SQS FIFO<br/>comandos + eventos + filas mortas"]
-    IAM["IAM + Pod Identity<br/>uma identidade por carga de trabalho"]
+    IAM["IAM<br/>cluster role externa + node role externa"]
     SSM["SSM<br/>16 parâmetros publicados"]
 
-    EKS --> IAM --> SSM
+    IAM --> EKS
+    EKS --> SSM
     ECR --> SSM
     SQS --> SSM
 ```
@@ -149,29 +150,27 @@ Configure em **Repository → Settings → Secrets and variables → Actions** d
 |---|---|---|
 | `AWS_REGION` | **Sim** | Região de todos os recursos. Os workflows abortam se estiver vazia |
 | `TF_STATE_BUCKET` | Não | Apenas compatibilidade com um bucket de estado pré-existente |
-| `PLATFORM_IAM_ROLES_JSON` | Apenas quando a conta não puder criar ou alterar roles IAM | ARNs de roles IAM existentes que o Platform Deploy deve reutilizar |
+| `PLATFORM_IAM_ROLES_JSON` | Sim, quando o Platform Deploy reutilizar roles externas | ARNs das roles externas do cluster e do node group |
 
 ### Roles IAM externas
 
-Por padrão, o Terraform cria e administra as roles da plataforma. Em contas com IAM restrito, configure `PLATFORM_IAM_ROLES_JSON` como **Repository Variable** para reutilizar roles fornecidas pela conta. ARN de role não é secret.
+Configure `PLATFORM_IAM_ROLES_JSON` como **Repository Variable** para reutilizar a cluster role externa e a node role externa. ARN de role não é secret.
 
 ```json
 {
   "eks_cluster_role_arn": "<ARN_DA_ROLE_DO_CLUSTER>",
-  "eks_node_group_role_arn": "<ARN_DA_ROLE_DO_NODE_GROUP>",
-  "load_balancer_controller_role_arn": "<ARN_DA_ROLE_DO_CONTROLLER>",
-  "workload_role_arn": "<ARN_DA_ROLE_COMPARTILHADA_DOS_WORKLOADS>"
+  "eks_node_group_role_arn": "<ARN_DA_ROLE_DO_NODE_GROUP>"
 }
 ```
 
-Campos ausentes são permitidos: quando um ARN não é informado, o Terraform tenta criar e administrar a role daquele componente.
+Com essas duas ARNs, o EKS usa roles externas para o cluster e os nodes. O AWS Load Balancer Controller, os serviços, os migrators e o bootstrap dos bancos usam as credenciais da node role pela cadeia padrão de credenciais AWS. Nenhuma role adicional de Pod Identity é obrigatória.
+
+Campos opcionais `load_balancer_controller_role_arn` e `workload_role_arn` continuam aceitos para uso futuro com Pod Identity. Quando eles não são informados, o Terraform não cria role, policy, attachment, associação Pod Identity, OIDC provider ou annotation IRSA para esses componentes.
 
 | Campo | Obrigatório quando | Componente | Trust esperado |
 |---|---|---|---|
-| `eks_cluster_role_arn` | A conta não puder criar/anexar a role do cluster | EKS cluster | `eks.amazonaws.com` com `sts:AssumeRole` |
-| `eks_node_group_role_arn` | A conta não puder criar/anexar a role dos nós | EKS node group | `ec2.amazonaws.com` com `sts:AssumeRole` |
-| `load_balancer_controller_role_arn` | A conta não puder criar/anexar a role do controller | AWS Load Balancer Controller | `pods.eks.amazonaws.com` com `sts:AssumeRole` e `sts:TagSession` |
-| `workload_role_arn` | A conta não puder criar/anexar as roles dos serviços | ServiceAccounts da aplicação e bootstrap | `pods.eks.amazonaws.com` com `sts:AssumeRole` e `sts:TagSession` |
+| `eks_cluster_role_arn` | O Platform Deploy reutilizar role externa | EKS cluster | `eks.amazonaws.com` com `sts:AssumeRole` |
+| `eks_node_group_role_arn` | O Platform Deploy reutilizar role externa | EKS node group, controller, workloads, migrators e bootstrap | `ec2.amazonaws.com` com `sts:AssumeRole` |
 
 Obtenha o ARN de uma role existente com:
 
@@ -182,11 +181,13 @@ aws iam get-role `
   --output text
 ```
 
-A role compartilhada de workloads simplifica a configuração, mas reduz o isolamento de permissões entre `cadastro-runtime`, `cadastro-migrator`, `estoque-runtime`, `estoque-migrator`, `ordens-runtime`, `ordens-migrator` e `db-bootstrap`. Ela precisa permitir a leitura dos segredos usados pelos pods e as ações SQS usadas pelos serviços. Caso os segredos usem chave KMS gerenciada pela conta, inclua também as permissões KMS necessárias.
+A node role precisa manter as permissões base dos nodes EKS, pull de imagens no ECR, leitura dos segredos e parâmetros usados pelos pods, ações SQS dos serviços e permissões core da policy oficial do AWS Load Balancer Controller v3.4.1 para criar e reconciliar ALB, target groups, listeners, listener rules, tags e security groups. Caso segredos ou parâmetros usem chave KMS gerenciada pela conta, inclua também a descriptografia necessária.
+
+Essa configuração é mais simples e compatível com contas com IAM restrito, porque o Platform Deploy não precisa criar roles adicionais para pods. O trade-off é menor isolamento: controller, serviços, migrators e bootstrap compartilham as permissões da node role. Para produção, prefira uma role por workload via Pod Identity ou IRSA quando a conta permitir esse desenho.
 
 ### O que é provisionado automaticamente
 
-Toda a infraestrutura deste repositório é criada pelos workflows, e **todas as variáveis do Terraform têm valor padrão** — inclusive as roles IAM, quando a conta permite criá-las. As versões dos charts Helm ficam em branco para que o Helm resolva a versão mais recente. Não há arquivo de variáveis a preencher, exceto a Repository Variable opcional de roles externas.
+Toda a infraestrutura deste repositório é criada pelos workflows, e **todas as variáveis do Terraform têm valor padrão**. Nesta estratégia, o Platform Deploy deve ser executado com `PLATFORM_IAM_ROLES_JSON` apontando para uma cluster role externa e uma node role externa compatível. Para AWS Load Balancer Controller e workloads, a ausência de role específica significa uso das credenciais da node role. O chart do AWS Load Balancer Controller fica fixado por padrão em `3.4.1`; os demais charts opcionais ficam em branco para que o Helm resolva a versão mais recente.
 
 A forma dos recursos vem dos arquivos em `config/` (nomes, dimensionamento do node group, retenção do ECR, tempos das filas, rotas da API), versionados junto ao código. Ajustes de plataforma são feitos por pull request nesses arquivos, não por variables do GitHub.
 
@@ -231,7 +232,7 @@ Somente leitura — não altera nada. Verifica o cluster, os addons, os nós, os
 
 | Serviço | O que verificar |
 |---|---|
-| **EKS** | Cluster `Active`, node group `Active`, 4 addons `Active` |
+| **EKS** | Cluster `Active`, node group `Active`, addons base `Active`; Pod Identity Agent apenas quando houver role específica opcional |
 | **ECR** | 3 repositórios, com imagem enviada após a etapa 5 |
 | **SQS** | 4 filas FIFO, cada fila principal com política de redirecionamento para a fila morta |
 | **API Gateway** | HTTP API com estágio padrão, autorizador do tipo requisição e VPC Link `Available` |

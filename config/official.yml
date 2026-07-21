@@ -1,29 +1,38 @@
 project:
   name: oficina
 
-cluster:
+ecs:
   name: oficina
-  namespace: oficina
-  kubernetesVersion: ""
-  endpointPublicAccess: true
-  endpointPrivateAccess: true
-  publicAccessCidrs:
-    - "0.0.0.0/0"
+  containerPort: 8080
+  desiredCount: 1
+  launchType: FARGATE
 
-nodeGroup:
+loadBalancer:
   name: oficina
-  instanceTypes:
-    - t3.medium
-  desiredSize: 1
-  minSize: 1
-  maxSize: 2
-  diskSize: 30
-  capacityType: ON_DEMAND
+  scheme: internal
+  listenerPort: 80
+  healthPath: /health
+  deregistrationDelaySeconds: 30
+
+services:
+  cadastro:
+    name: oficina-cadastro
+    targetGroupName: oficina-cadastro
+    logGroupName: /ecs/oficina/cadastro
+  estoque:
+    name: oficina-estoque
+    targetGroupName: oficina-estoque
+    logGroupName: /ecs/oficina/estoque
+  ordens:
+    name: oficina-ordens-servico
+    targetGroupName: oficina-ordens
+    logGroupName: /ecs/oficina/ordens
 
 ecr:
   cadastro: oficina-cadastro
   estoque: oficina-estoque
   ordens: oficina-ordens-servico
+  dbBootstrap: oficina-db-bootstrap
   imageTagMutability: IMMUTABLE
   scanOnPush: true
   retainedImages: 20
@@ -34,10 +43,3 @@ sqs:
   maxReceiveCount: 3
   messageRetentionSeconds: 345600
   dlqRetentionSeconds: 1209600
-
-workloadIdentity:
-  mode: pod-identity
-
-observability:
-  enableNewRelic: false
-  newRelicSecretName: /oficina/observability/new-relic

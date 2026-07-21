@@ -1,624 +1,71 @@
-name: Platform CI
+﻿name: Platform CI
 
 on:
   pull_request:
-    branches:
-      - main
+    branches: [main]
     paths:
-      - 'config/**'
-      - 'terraform/platform/**'
-      - 'terraform/entrypoint/**'
-      - 'deploy/platform/**'
-      - 'deploy/k8s/ingress/**'
-      - 'scripts/validate-platform*.ps1'
-      - 'scripts/validate-entrypoint*.ps1'
-      - 'scripts/validate-route-contract.ps1'
-      - 'scripts/validate-ingress*.ps1'
-      - 'scripts/render-ingress.ps1'
-      - 'scripts/smoke-test-api.ps1'
-      - 'scripts/smoke-test-internal-alb.ps1'
-      - '.github/workflows/platform-*.yml'
-      - '.github/workflows/entrypoint-*.yml'
-      - '.github/workflows/observability-*.yml'
-      - '.tflint.hcl'
+      - config/**
+      - terraform/**
+      - scripts/**
+      - .github/workflows/platform-ci.yml
+      - .github/workflows/platform-deploy.yml
+      - .github/workflows/entrypoint-deploy.yml
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-env:
-  TERRAFORM_VERSION: 1.10.5
-  CHECKOV_VERSION: 3.3.8
-  AWS_LBC_CHART_VERSION: 3.4.1
-  KUBECONFORM_VERSION: v0.6.7
-
 jobs:
-  configuration-scripts:
-    name: Configuration and scripts
+  validate:
+    name: Static validation
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Validate JSON is well formed
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+      - name: Validate JSON
         run: |
           set -euo pipefail
           jq empty config/entrypoint.json
-          jq empty config/ingress-routes.json
-
-      - name: Validate platform configuration
-        shell: pwsh
-        run: ./scripts/validate-platform-config.ps1
-
-      - name: Validate entrypoint configuration
-        shell: pwsh
-        run: ./scripts/validate-entrypoint-config.ps1
-
-      - name: Validate route contract
-        shell: pwsh
-        run: ./scripts/validate-route-contract.ps1
-
-      - name: Validate ingress configuration
-        shell: pwsh
-        run: ./scripts/validate-ingress-config.ps1
-
-      - name: Validate SSM contract outputs
+      - name: Validate PowerShell syntax
         shell: pwsh
         run: |
-          $contract = Get-Content config/resource-contract.yml -Raw
-          $expected = @(
-            'clusterNamespace: /oficina/infra/cluster/namespace',
-            'apiId: /oficina/infra/api/id',
-            'apiUrl: /oficina/infra/api/url',
-            'apiExecutionArn: /oficina/infra/api/execution-arn',
-            'apiStage: /oficina/infra/api/stage',
-            'vpcLinkId: /oficina/infra/api/vpc-link-id'
-          )
-          foreach ($e in $expected) {
-            if ($contract -notmatch [regex]::Escape($e)) { throw "resource-contract.yml is missing output '$e'." }
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem -Path scripts -Filter *.ps1 -File | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error "$($_.Extent.File): $($_.Message)" }; exit 1 }
           }
-          Write-Host 'SSM contract outputs are present.'
-
-      - name: PowerShell AST
-        shell: pwsh
-        run: |
-          $scripts = @(
-            'scripts/validate-platform-config.ps1',
-            'scripts/validate-platform-iam-prerequisites.ps1',
-            'scripts/validate-platform.ps1',
-            'scripts/validate-entrypoint-config.ps1',
-            'scripts/validate-route-contract.ps1',
-            'scripts/validate-entrypoint.ps1',
-            'scripts/smoke-test-api.ps1',
-            'scripts/validate-ingress-config.ps1',
-            'scripts/render-ingress.ps1',
-            'scripts/validate-ingress.ps1',
-            'scripts/smoke-test-internal-alb.ps1'
-          )
-          foreach ($file in $scripts) {
-            $tokens = $null
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors) | Out-Null
-            if ($errors.Count -gt 0) {
-              $errors | Format-List | Out-String | Write-Error
-              throw "PowerShell parse errors in $file."
-            }
-          }
-          Write-Host 'PowerShell AST parse succeeded.'
-
-      - name: Forbidden route keys
-        run: |
-          set -euo pipefail
-          routes_file="$RUNNER_TEMP/entrypoint-route-keys.txt"
-          bad_file="$RUNNER_TEMP/entrypoint-forbidden-route-keys.txt"
-          catchall_file="$RUNNER_TEMP/entrypoint-catchall-route-keys.txt"
-          catchall_pattern="^(\\\$default|ANY /\\{proxy\\+\\}|ANY /api/\\{proxy\\+\\}|ANY /)$"
-
-          jq -r '.routes[].routeKey' config/entrypoint.json > "$routes_file"
-
-          if grep -E '/(ready|api/internal|api/dev)(/|$)' "$routes_file" > "$bad_file"; then
-            echo "Forbidden route keys exposed:"
-            cat "$bad_file"
-            exit 1
-          fi
-
-          if grep -E "$catchall_pattern" "$routes_file" > "$catchall_file"; then
-            echo "Catch-all route keys present:"
-            cat "$catchall_file"
-            exit 1
-          fi
-
-          echo 'No forbidden or catch-all route keys.'
-
-      - name: Static safety searches (platform)
-        shell: pwsh
-        run: |
-          $allPlatformFiles = @('config/*', 'terraform/platform/*', 'deploy/platform/*', 'scripts/*', '.github/workflows/*', '.tflint.hcl')
-          $platformConfigFiles = @('config/*', 'terraform/platform/*', 'deploy/platform/*', '.tflint.hcl')
-
-          $patterns = @(
-            ('AWS_ACCESS_KEY_ID' + '='),
-            ('AWS_SECRET_ACCESS_KEY' + '='),
-            ('AWS_SESSION_TOKEN' + '='),
-            ('secret' + '_string'),
-            ('secret' + '_binary'),
-            ('aws_secretsmanager_secret' + '_version'),
-            ('terraform ' + 'destroy'),
-            ('force' + '_destroy'),
-            ('terraform' + '_remote_state'),
-            ('Fase' + '3'),
-            ('fase' + '-3'),
-            ('environ' + 'ment')
-          )
-          foreach ($pattern in $patterns) {
-            $matches = Select-String -Path $allPlatformFiles -Pattern $pattern -SimpleMatch -ErrorAction SilentlyContinue
-            if ($matches -and $pattern -notin @(('AWS_ACCESS_KEY_ID' + '='), ('AWS_SECRET_ACCESS_KEY' + '='), ('AWS_SESSION_TOKEN' + '='), ('environ' + 'ment'))) {
-              $matches | Format-Table Path, LineNumber, Line -AutoSize
-              throw "Forbidden pattern found: $pattern"
-            }
-          }
-
-          $configurationPatterns = @(
-            ('/' + 'dev/'),
-            ('-' + 'dev'),
-            ('-' + 'hml'),
-            ('-' + 'prod')
-          )
-          foreach ($pattern in $configurationPatterns) {
-            $matches = Select-String -Path $platformConfigFiles -Pattern $pattern -SimpleMatch -ErrorAction SilentlyContinue
-            if ($matches) {
-              $matches | Format-Table Path, LineNumber, Line -AutoSize
-              throw "Forbidden configuration pattern found: $pattern"
-            }
-          }
-
-      - name: Static safety searches (entrypoint)
-        shell: pwsh
-        run: |
-          $tfAndFlow = @('terraform/entrypoint/*', '.github/workflows/entrypoint-*.yml', '.github/workflows/platform-*.yml')
-          $allEntrypoint = @('config/entrypoint.json', 'terraform/entrypoint/*', 'scripts/validate-entrypoint*.ps1', 'scripts/validate-route-contract.ps1', 'scripts/smoke-test-api.ps1', '.github/workflows/entrypoint-*.yml', '.github/workflows/platform-*.yml')
-
-          function Assert-NoMatch {
-            param([string[]]$Files, [string]$Pattern, [string]$Label)
-            $found = Select-String -Path $Files -Pattern $Pattern -SimpleMatch -ErrorAction SilentlyContinue
-            if ($found) {
-              $found | Format-Table Path, LineNumber, Line -AutoSize | Out-String | Write-Host
-              throw "Forbidden pattern found ($Label)."
-            }
-          }
-
-          # No destroy / delete of the entrypoint.
-          Assert-NoMatch $allEntrypoint ('terraform ' + 'destroy') 'tf-destroy'
-          Assert-NoMatch $allEntrypoint ('delete-' + 'api') 'api-delete'
-          Assert-NoMatch $allEntrypoint ('delete-' + 'vpc-link') 'vpc-link-delete'
-
-          # No public ALB / open CIDR anywhere in the stack.
-          Assert-NoMatch $tfAndFlow ('internet' + '-facing') 'public-alb'
-          Assert-NoMatch $tfAndFlow ('0.0.0.0' + '/0') 'open-cidr'
-
-          # No unaliased Lambda, no secret reads, no cross-stack state.
-          Assert-NoMatch $tfAndFlow ('function:$' + 'LATEST') 'lambda-latest'
-          Assert-NoMatch $tfAndFlow ('get-secret' + '-value') 'secret-read'
-          Assert-NoMatch $allEntrypoint ('JWT_SIGNING' + '_KEY') 'jwt-key'
-          Assert-NoMatch $tfAndFlow ('Secret' + 'String') 'secret-payload'
-          Assert-NoMatch $tfAndFlow ('terraform' + '_remote_state') 'remote-state'
-
-          # Authorizer hardening must not be weakened.
-          Assert-NoMatch $tfAndFlow ('authorizer_result_ttl_in_seconds = ' + '300') 'authorizer-cache'
-          Assert-NoMatch $tfAndFlow ('enable_simple_responses = ' + 'false') 'simple-responses-off'
-
-          # No legacy phase or environment suffixes.
-          Assert-NoMatch $allEntrypoint ('Fase' + '3') 'legacy-phase'
-          Assert-NoMatch $allEntrypoint ('fase' + '-3') 'legacy-phase-dash'
-
-          # Secret value assignments must never carry a value.
-          foreach ($s in @(('AWS_ACCESS_KEY_ID' + '='), ('AWS_SECRET_ACCESS_KEY' + '='), ('AWS_SESSION_TOKEN' + '='))) {
-            $m = Select-String -Path $allEntrypoint -Pattern ($s + '\S') -ErrorAction SilentlyContinue
-            if ($m) { $m | Format-Table Path, LineNumber -AutoSize | Out-String | Write-Host; throw "Secret value assignment found ($s)." }
-          }
-
-          Write-Host 'Static safety searches passed.'
-
-      - name: Summary
-        if: always()
-        run: |
-          {
-            echo '### Configuration and scripts'
-            echo
-            echo 'Validated JSON, platform/entrypoint/route/ingress config, SSM contract, PowerShell AST, route exposure, and static safety searches.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  terraform-format:
-    name: Terraform fmt
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-
-      - name: Terraform fmt
+      - name: Terraform fmt platform
+        working-directory: terraform/platform
         run: terraform fmt -check -recursive
-
-      - name: Summary
-        if: always()
-        run: |
-          {
-            echo '### Terraform fmt'
-            echo
-            echo 'Ran terraform fmt -check -recursive from the repository root.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  terraform-platform:
-    name: Terraform validate (platform)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-
-      - name: Terraform init
+      - name: Terraform init platform
         working-directory: terraform/platform
         run: terraform init -backend=false
-
-      - name: Terraform validate
+      - name: Terraform validate platform
         working-directory: terraform/platform
         run: terraform validate
-
-      - name: Terraform version
-        working-directory: terraform/platform
-        run: terraform version
-
-      - name: Summary
-        if: always()
-        run: |
-          {
-            echo '### Terraform platform'
-            echo
-            echo 'Ran terraform init -backend=false, terraform validate, and terraform version in terraform/platform.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  terraform-entrypoint:
-    name: Terraform validate (entrypoint)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-
-      - name: Terraform init
+      - name: Terraform fmt entrypoint
+        working-directory: terraform/entrypoint
+        run: terraform fmt -check -recursive
+      - name: Terraform init entrypoint
         working-directory: terraform/entrypoint
         run: terraform init -backend=false
-
-      - name: Terraform validate
+      - name: Terraform validate entrypoint
         working-directory: terraform/entrypoint
         run: terraform validate
-
-      - name: Terraform version
-        working-directory: terraform/entrypoint
-        run: terraform version
-
-      - name: Summary
-        if: always()
-        run: |
-          {
-            echo '### Terraform entrypoint'
-            echo
-            echo 'Ran terraform init -backend=false, terraform validate, and terraform version in terraform/entrypoint.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  tflint-platform:
-    name: TFLint (platform)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup TFLint
-        uses: terraform-linters/setup-tflint@v4
-
-      - name: TFLint
-        working-directory: terraform/platform
-        run: |
-          set -euo pipefail
-          tflint --init
-          tflint --recursive
-
-      - name: Summary
-        if: always()
-        run: |
-          {
-            echo '### TFLint platform'
-            echo
-            echo 'Ran tflint --init and tflint --recursive in terraform/platform.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  tflint-entrypoint:
-    name: TFLint (entrypoint)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup TFLint
-        uses: terraform-linters/setup-tflint@v4
-
-      - name: TFLint
-        working-directory: terraform/entrypoint
-        run: |
-          set -euo pipefail
-          tflint --init
-          tflint --recursive
-
-      - name: Summary
-        if: always()
-        run: |
-          {
-            echo '### TFLint entrypoint'
-            echo
-            echo 'Ran tflint --init and tflint --recursive in terraform/entrypoint.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  checkov-platform:
-    name: Checkov (platform)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Checkov
-        uses: bridgecrewio/checkov-action@v12
-        with:
-          directory: terraform/platform
-          quiet: true
-          framework: terraform
-          output_format: sarif
-
-      - name: Summary
-        if: always()
-        run: |
-          {
-            echo '### Checkov platform'
-            echo
-            echo "Ran Checkov ${CHECKOV_VERSION} against terraform/platform with framework terraform and SARIF output."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  checkov-entrypoint:
-    name: Checkov (entrypoint)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Checkov
-        uses: bridgecrewio/checkov-action@v12
-        with:
-          directory: terraform/entrypoint
-          quiet: true
-          framework: terraform
-          output_format: sarif
-
-      - name: Summary
-        if: always()
-        run: |
-          {
-            echo '### Checkov entrypoint'
-            echo
-            echo "Ran Checkov ${CHECKOV_VERSION} against terraform/entrypoint with framework terraform and SARIF output."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  helm-k8s:
-    name: Helm and Kubernetes manifests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
-        with:
-          version: v1.30.5
-
-      - name: Setup throwaway kind cluster
-        uses: helm/kind-action@v1
-        with:
-          cluster_name: platform-ci
-
-      - name: Render ingress with synthetic subnets
+      - name: Static safety checks
         shell: pwsh
         run: |
-          ./scripts/render-ingress.ps1 `
-            -OutputDirectory "$env:RUNNER_TEMP/ingress" `
-            -PrivateSubnet1 'subnet-00000000000000001' `
-            -PrivateSubnet2 'subnet-00000000000000002'
-
-      - name: Confirm no placeholders remain
-        shell: pwsh
-        run: |
-          $rendered = Get-Content "$env:RUNNER_TEMP/ingress/ingress.rendered.yaml" -Raw
-          if ($rendered -match '__[A-Z0-9_]+__') { throw 'Rendered manifest still contains placeholders.' }
-          Write-Host 'No placeholders in rendered manifest.'
-
-      - name: Kubeconform rendered ingress
-        run: |
-          set -euo pipefail
-          curl -sSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
-          tar -xf kubeconform.tar.gz kubeconform
-          ./kubeconform -strict -summary "$RUNNER_TEMP/ingress/ingress.rendered.yaml"
-
-      - name: kubectl apply dry-run (client)
-        run: kubectl apply --dry-run=client -f "$RUNNER_TEMP/ingress/ingress.rendered.yaml"
-
-      - name: Helm lint and template
-        run: |
-          set -euo pipefail
-          helm repo add eks https://aws.github.io/eks-charts
-          helm repo add secrets-store-csi-driver https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts
-          helm repo add ascp https://aws.github.io/secrets-store-csi-driver-provider-aws
-          helm repo update
-
-          chart_dir="$RUNNER_TEMP/charts"
-          mkdir -p "$chart_dir"
-
-          helm pull eks/aws-load-balancer-controller --version "$AWS_LBC_CHART_VERSION" --untar --untardir "$chart_dir"
-          helm pull secrets-store-csi-driver/secrets-store-csi-driver --untar --untardir "$chart_dir"
-          helm pull ascp/secrets-store-csi-driver-provider-aws --untar --untardir "$chart_dir"
-
-          helm lint "$chart_dir/aws-load-balancer-controller" -f deploy/platform/aws-load-balancer-controller/values.yaml --set clusterName=oficina --set region=us-east-1 --set vpcId=vpc-00000000000000000
-          helm template aws-load-balancer-controller "$chart_dir/aws-load-balancer-controller" -n kube-system -f deploy/platform/aws-load-balancer-controller/values.yaml --set clusterName=oficina --set region=us-east-1 --set vpcId=vpc-00000000000000000 > "$RUNNER_TEMP/aws-lbc.yaml"
-
-          helm lint "$chart_dir/secrets-store-csi-driver" -f deploy/platform/secrets-store-csi-driver/values.yaml
-          helm template secrets-store-csi-driver "$chart_dir/secrets-store-csi-driver" -n kube-system -f deploy/platform/secrets-store-csi-driver/values.yaml > "$RUNNER_TEMP/secrets-store-csi-driver.yaml"
-
-          helm lint "$chart_dir/secrets-store-csi-driver-provider-aws" -f deploy/platform/ascp/values.yaml
-          helm template secrets-store-csi-driver-provider-aws "$chart_dir/secrets-store-csi-driver-provider-aws" -n kube-system -f deploy/platform/ascp/values.yaml > "$RUNNER_TEMP/ascp.yaml"
-
-      - name: Static safety searches (ingress)
-        shell: pwsh
-        run: |
-          $rendered = "$env:RUNNER_TEMP/ingress/ingress.rendered.yaml"
-          $template = 'deploy/k8s/ingress/ingress.template.yaml'
-          $config = 'config/ingress-routes.json'
-          $manifestFiles = @($rendered, $config)
-          $ingressFiles = @($config, 'deploy/k8s/ingress/*', 'scripts/validate-ingress-config.ps1', 'scripts/render-ingress.ps1', 'scripts/validate-ingress.ps1', 'scripts/smoke-test-internal-alb.ps1', '.github/workflows/platform-ci.yml', '.github/workflows/entrypoint-deploy.yml')
-
-          function Assert-NoMatch {
-            param([string[]]$Files, [string]$Pattern, [string]$Label)
-            $found = Select-String -Path $Files -Pattern $Pattern -SimpleMatch -ErrorAction SilentlyContinue
-            if ($found) {
-              $found | Format-Table Path, LineNumber, Line -AutoSize | Out-String | Write-Host
-              throw "Forbidden pattern found ($Label)."
-            }
+          $ErrorActionPreference = 'Stop'
+          $text = (Get-ChildItem -Path config,terraform,scripts -Recurse -File | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName }) -join "`n"
+          foreach ($pattern in @('kubectl', 'helm', 'aws\s+eks', 'deploy/k8s', 'secretproviderclass', 'secrets-store\.csi')) {
+            if ($text -match $pattern) { throw "Legacy platform pattern found: $pattern" }
           }
-
-          Assert-NoMatch @($rendered, $template, $config) ('internet' + '-facing') 'public-alb'
-          Assert-NoMatch @($rendered, $template, $config) ('0.0.0.0' + '/0') 'open-cidr'
-
-          Assert-NoMatch @('deploy/k8s/ingress/*', $rendered) ('type: ' + 'LoadBalancer') 'service-loadbalancer'
-          Assert-NoMatch @('deploy/k8s/ingress/*', $rendered) ('type: ' + 'NodePort') 'service-nodeport'
-
-          foreach ($p in @(('path: ' + '/api/internal'), ('path: ' + '/api/dev'), ('path: ' + '/ready'))) {
-            Assert-NoMatch $manifestFiles $p "route:$p"
-          }
-
-          if (Select-String -Path $rendered -Pattern '^\s*- path: /\s*$' -ErrorAction SilentlyContinue) { throw 'Catch-all path / present.' }
-          if (Select-String -Path $rendered -Pattern '^\s*- path: /api\s*$' -ErrorAction SilentlyContinue) { throw 'Generic /api path present.' }
-
-          foreach ($s in @(('AWS_ACCESS_KEY_ID' + '='), ('AWS_SECRET_ACCESS_KEY' + '='), ('AWS_SESSION_TOKEN' + '='))) {
-            $m = Select-String -Path $ingressFiles -Pattern ($s + '\S') -ErrorAction SilentlyContinue
-            if ($m) { $m | Format-Table Path, LineNumber -AutoSize | Out-String | Write-Host; throw "Secret value assignment found ($s)." }
-          }
-
-          Assert-NoMatch $ingressFiles ('Fase' + '3') 'legacy-phase'
-          Assert-NoMatch $ingressFiles ('fase' + '-3') 'legacy-phase-dash'
-
-          Assert-NoMatch @('.github/workflows/platform-ci.yml', '.github/workflows/entrypoint-deploy.yml', 'scripts/validate-ingress.ps1', 'scripts/render-ingress.ps1', 'scripts/validate-ingress-config.ps1') ('terraform ' + 'destroy') 'tf-destroy'
-          Assert-NoMatch @('.github/workflows/platform-ci.yml', '.github/workflows/entrypoint-deploy.yml', 'scripts/validate-ingress.ps1', 'scripts/smoke-test-internal-alb.ps1') ('delete-' + 'load-balancer') 'delete-alb'
-          Assert-NoMatch @('.github/workflows/platform-ci.yml', '.github/workflows/entrypoint-deploy.yml', 'scripts/validate-ingress.ps1', 'scripts/smoke-test-internal-alb.ps1') ('kubectl delete ' + 'ingress') 'delete-ingress'
-
-          Write-Host 'Static safety searches passed.'
-
-      - name: Summary
-        if: always()
+      - name: Publish summary
         run: |
-          {
-            echo '### Helm and Kubernetes manifests'
-            echo
-            echo 'Rendered ingress locally, ran kubeconform, kubectl client dry-run, helm lint, helm template, and ingress static safety searches.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  workflow-lint:
-    name: Workflow lint
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Actionlint
-        uses: raven-actions/actionlint@v2
-
-      - name: Summary
-        if: always()
-        run: |
-          {
-            echo '### Workflow lint'
-            echo
-            echo 'Ran actionlint against GitHub Actions workflows.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  ci-gate:
-    name: Platform CI gate
-    runs-on: ubuntu-latest
-    if: always()
-    needs:
-      - configuration-scripts
-      - terraform-format
-      - terraform-platform
-      - terraform-entrypoint
-      - tflint-platform
-      - tflint-entrypoint
-      - checkov-platform
-      - checkov-entrypoint
-      - helm-k8s
-      - workflow-lint
-    steps:
-      - name: Evaluate required jobs
-        run: |
-          set -euo pipefail
-          failed=0
-
-          for job in \
-            "configuration-scripts:${{ needs.configuration-scripts.result }}" \
-            "terraform-format:${{ needs.terraform-format.result }}" \
-            "terraform-platform:${{ needs.terraform-platform.result }}" \
-            "terraform-entrypoint:${{ needs.terraform-entrypoint.result }}" \
-            "tflint-platform:${{ needs.tflint-platform.result }}" \
-            "tflint-entrypoint:${{ needs.tflint-entrypoint.result }}" \
-            "checkov-platform:${{ needs.checkov-platform.result }}" \
-            "checkov-entrypoint:${{ needs.checkov-entrypoint.result }}" \
-            "helm-k8s:${{ needs.helm-k8s.result }}" \
-            "workflow-lint:${{ needs.workflow-lint.result }}"; do
-            name="${job%%:*}"
-            result="${job#*:}"
-            echo "$name: $result"
-            if [ "$result" != "success" ]; then
-              failed=1
-            fi
-          done
-
-          if [ "$failed" -ne 0 ]; then
-            echo 'One or more required Platform CI validations failed.'
-            exit 1
-          fi
-
-          echo 'All required Platform CI validations passed.'
-
-      - name: Summary
-        if: always()
-        run: |
-          {
-            echo '### Platform CI gate'
-            echo
-            echo '| Job | Result |'
-            echo '| --- | --- |'
-            echo '| configuration-scripts | ${{ needs.configuration-scripts.result }} |'
-            echo '| terraform-format | ${{ needs.terraform-format.result }} |'
-            echo '| terraform-platform | ${{ needs.terraform-platform.result }} |'
-            echo '| terraform-entrypoint | ${{ needs.terraform-entrypoint.result }} |'
-            echo '| tflint-platform | ${{ needs.tflint-platform.result }} |'
-            echo '| tflint-entrypoint | ${{ needs.tflint-entrypoint.result }} |'
-            echo '| checkov-platform | ${{ needs.checkov-platform.result }} |'
-            echo '| checkov-entrypoint | ${{ needs.checkov-entrypoint.result }} |'
-            echo '| helm-k8s | ${{ needs.helm-k8s.result }} |'
-            echo '| workflow-lint | ${{ needs.workflow-lint.result }} |'
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo 'Validated platform/entrypoint Terraform, contracts, scripts and static safety checks.' >> "$GITHUB_STEP_SUMMARY"

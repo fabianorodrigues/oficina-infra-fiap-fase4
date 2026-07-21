@@ -9,14 +9,27 @@ inputs:
 
 outputs:
   clusterName: /oficina/infra/cluster/name
-  clusterNamespace: /oficina/infra/cluster/namespace
   clusterArn: /oficina/infra/cluster/arn
-  clusterEndpoint: /oficina/infra/cluster/endpoint
-  clusterSecurityGroupId: /oficina/infra/cluster/security-group-id
+  ecsTaskSecurityGroupId: /oficina/infra/ecs/task-security-group-id
+
+  albName: /oficina/infra/alb/name
+  albArn: /oficina/infra/alb/arn
+  albDnsName: /oficina/infra/alb/dns-name
+  albSecurityGroupId: /oficina/infra/alb/security-group-id
+  albListenerArn: /oficina/infra/alb/listener-arn
+
+  cadastroTargetGroupArn: /oficina/infra/ecs/cadastro/target-group-arn
+  estoqueTargetGroupArn: /oficina/infra/ecs/estoque/target-group-arn
+  ordensTargetGroupArn: /oficina/infra/ecs/ordens/target-group-arn
+
+  cadastroLogGroupName: /oficina/infra/ecs/cadastro/log-group-name
+  estoqueLogGroupName: /oficina/infra/ecs/estoque/log-group-name
+  ordensLogGroupName: /oficina/infra/ecs/ordens/log-group-name
 
   cadastroEcr: /oficina/infra/ecr/cadastro
   estoqueEcr: /oficina/infra/ecr/estoque
   ordensEcr: /oficina/infra/ecr/ordens
+  dbBootstrapEcr: /oficina/infra/ecr/db-bootstrap
 
   estoqueCommandQueueUrl: /oficina/infra/sqs/estoque-comandos/url
   estoqueCommandQueueArn: /oficina/infra/sqs/estoque-comandos/arn
@@ -43,4 +56,3 @@ secrets:
   ordensMigrationDb: /oficina/ordens/migration-db
   authDatabase: /oficina/auth/database
   authJwt: /oficina/auth/jwt
-  newRelic: /oficina/observability/new-relic

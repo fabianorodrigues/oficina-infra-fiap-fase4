@@ -1,42 +1,21 @@
-name: Observability Validate
+﻿name: Observability Validate
 
 on:
   workflow_dispatch:
-    inputs:
-      confirmation:
-        description: Type VALIDATE to inspect AWS-native observability.
-        required: true
-        type: string
 
 permissions:
   contents: read
 
-concurrency:
-  group: observability-validate
-  cancel-in-progress: false
-
 jobs:
   validate:
-    name: Validate observability
+    name: Validate ECS observability
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
     steps:
-      - name: Validate request
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:GITHUB_REF -ne 'refs/heads/main') {
-            throw 'This workflow must run from main.'
-          }
-          if ('${{ inputs.confirmation }}' -cne 'VALIDATE') {
-            throw 'Confirmation must be VALIDATE.'
-          }
-          if ([string]::IsNullOrWhiteSpace($env:AWS_REGION)) {
-            throw 'Repository Variable AWS_REGION is required.'
-          }
-
+      - name: Validate region
+        run: test -n "$AWS_REGION"
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -44,68 +23,15 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ vars.AWS_REGION }}
-
-      - name: Resolve platform
+      - name: Validate log groups and metrics surface
         run: |
           set -euo pipefail
-          cluster=$(aws ssm get-parameter --name /oficina/infra/cluster/name --region "${AWS_REGION}" --query Parameter.Value --output text)
-          namespace=$(aws ssm get-parameter --name /oficina/infra/cluster/namespace --region "${AWS_REGION}" --query Parameter.Value --output text)
-          api_url=$(aws ssm get-parameter --name /oficina/infra/api/url --region "${AWS_REGION}" --query Parameter.Value --output text)
-          api_id=$(aws ssm get-parameter --name /oficina/infra/api/id --region "${AWS_REGION}" --query Parameter.Value --output text)
-          {
-            echo "CLUSTER_NAME=$cluster"
-            echo "NAMESPACE=$namespace"
-            echo "API_URL=$api_url"
-            echo "API_ID=$api_id"
-          } >> "$GITHUB_ENV"
-
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
-        with:
-          version: v1.30.5
-
-      - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
-
-      - name: Validate EKS
-        run: |
-          set -euo pipefail
-          aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --query 'cluster.status' --output text | grep -q ACTIVE
-          aws eks list-addons --cluster-name "${CLUSTER_NAME}" --region "${AWS_REGION}"
-          kubectl wait --for=condition=Ready nodes --all --timeout=10m
-          kubectl get deployments -n "${NAMESPACE}"
-
-      - name: Validate CloudWatch
-        run: |
-          set -euo pipefail
-          aws logs describe-log-groups --log-group-name-prefix "/aws/apigateway/oficina-api" --region "${AWS_REGION}" --query 'logGroups[0].logGroupName' --output text | grep -v '^None$'
-          aws logs describe-log-groups --log-group-name-prefix "/aws/eks/${CLUSTER_NAME}/cluster" --region "${AWS_REGION}" --query 'logGroups[0].logGroupName' --output text | grep -v '^None$'
-          for fn in /oficina/auth/cpf/function-name /oficina/auth/authorizer/function-name; do
-            name=$(aws ssm get-parameter --name "$fn" --region "${AWS_REGION}" --query Parameter.Value --output text)
-            aws logs describe-log-groups --log-group-name-prefix "/aws/lambda/${name}" --region "${AWS_REGION}" --query 'logGroups[0].logGroupName' --output text | grep -v '^None$'
+          cluster=$(aws ssm get-parameter --name /oficina/infra/cluster/name --region "$AWS_REGION" --query Parameter.Value --output text)
+          aws ecs describe-clusters --clusters "$cluster" --region "$AWS_REGION" --include SETTINGS >/dev/null
+          for group in /ecs/oficina/cadastro /ecs/oficina/estoque /ecs/oficina/ordens /ecs/oficina/db-bootstrap /aws/apigateway/oficina-api; do
+            aws logs describe-log-groups --log-group-name-prefix "$group" --region "$AWS_REGION" --query 'logGroups[0].logGroupName' --output text | grep -v '^None$'
           done
-
-      - name: Validate health
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          foreach ($target in @('cadastro', 'estoque', 'ordens')) {
-            $uri = "$($env:API_URL.TrimEnd([char]'/'))/health/$target"
-            $response = Invoke-WebRequest -Method Get -Uri $uri -TimeoutSec 20 -SkipHttpErrorCheck
-            if ([int]$response.StatusCode -ne 200) {
-              throw "$uri returned HTTP $($response.StatusCode)."
-            }
-          }
-
+          aws cloudwatch list-metrics --namespace AWS/ECS --metric-name CPUUtilization --region "$AWS_REGION" >/dev/null
+          aws cloudwatch list-metrics --namespace AWS/ApplicationELB --metric-name HealthyHostCount --region "$AWS_REGION" >/dev/null
       - name: Publish summary
-        run: |
-          {
-            echo '## Observability Validate'
-            echo
-            echo "- Region: ${AWS_REGION}"
-            echo "- Cluster: ${CLUSTER_NAME}"
-            echo "- Namespace: ${NAMESPACE}"
-            echo "- API id: ${API_ID}"
-            echo "- CloudWatch log groups: API Gateway, EKS and Auth Lambdas"
-            echo "- Health endpoints: cadastro, estoque and ordens"
-          } >> "$GITHUB_STEP_SUMMARY"
+        run: echo 'ECS, API Gateway and ALB observability surfaces validated.' >> "$GITHUB_STEP_SUMMARY"
