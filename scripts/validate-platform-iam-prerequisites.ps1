@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$PlanJsonPath = 'tfplan.json'
+    [string]$PlanJsonPath = 'tfplan.json',
+    [string]$CallerArn = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,11 +12,14 @@ function Fail([string]$Message) {
 
 function Add-RequiredAction {
     param(
-        [Parameter(Mandatory = $true)]
         [System.Collections.Generic.HashSet[string]]$Actions,
         [Parameter(Mandatory = $true)]
         [string]$Action
     )
+
+    if ($null -eq $Actions) {
+        Fail 'Required actions collection was not initialized.'
+    }
 
     [void]$Actions.Add($Action)
 }
@@ -41,13 +45,15 @@ if ($iamCreates.Count -eq 0) {
     exit 0
 }
 
-$identityRaw = & aws sts get-caller-identity --output json
-if ($LASTEXITCODE -ne 0) {
-    Fail 'Unable to resolve AWS caller identity.'
-}
+if ([string]::IsNullOrWhiteSpace($CallerArn)) {
+    $identityRaw = & aws sts get-caller-identity --output json
+    if ($LASTEXITCODE -ne 0) {
+        Fail 'Unable to resolve AWS caller identity.'
+    }
 
-$identity = ([string]::Join("`n", $identityRaw)) | ConvertFrom-Json
-$callerArn = [string]$identity.Arn
+    $identity = ([string]::Join("`n", $identityRaw)) | ConvertFrom-Json
+    $CallerArn = [string]$identity.Arn
+}
 
 $requiredActions = [System.Collections.Generic.HashSet[string]]::new()
 foreach ($change in $iamCreates) {
@@ -67,9 +73,9 @@ if ($eksPassRoleCreates.Count -gt 0) {
 $requiredActionsText = (@($requiredActions) | Sort-Object) -join ', '
 $iamResourcesText = (@($iamCreates | ForEach-Object { "$($_.address) ($($_.type))" }) | Sort-Object) -join '; '
 
-if ($callerArn -match ':assumed-role/voclabs/') {
-    Fail "AWS caller '$callerArn' is the AWS Academy VocLabs role. This plan creates IAM resources: $iamResourcesText. The platform stack requires these IAM actions before apply: $requiredActionsText. Use GitHub Actions secrets for an IAM-capable deploy principal, or pre-create/import the IAM roles and policies before applying this stack."
+if ($CallerArn -match ':assumed-role/voclabs/') {
+    Fail "AWS caller '$CallerArn' is the AWS Academy VocLabs role. This plan creates IAM resources: $iamResourcesText. The platform stack requires these IAM actions before apply: $requiredActionsText. Use GitHub Actions secrets for an IAM-capable deploy principal, or pre-create/import the IAM roles and policies before applying this stack."
 }
 
 Write-Host "Platform plan creates IAM resources: $iamResourcesText"
-Write-Host "Ensure AWS caller '$callerArn' allows these IAM actions before apply: $requiredActionsText"
+Write-Host "Ensure AWS caller '$CallerArn' allows these IAM actions before apply: $requiredActionsText"
