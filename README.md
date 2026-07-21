@@ -1,243 +1,217 @@
 # oficina-infra
 
-> Plataforma compartilhada e ponto de entrada da solução Oficina: cluster EKS, registros de imagem, filas e API Gateway.
-> **Terraform** · **AWS** (EKS, ECR, SQS FIFO, API Gateway, IAM) · **Helm** · **GitHub Actions**
+Plataforma compartilhada e ponto de entrada da solução **Oficina**: cluster **ECS Fargate**, **ALB interno**, registros de imagem, filas e **API Gateway**.
+
+![Terraform](https://img.shields.io/badge/Terraform-1.10-7B42BC?logo=terraform&logoColor=white)
+![AWS](https://img.shields.io/badge/AWS-ECS%20Fargate%20%C2%B7%20ALB%20%C2%B7%20API%20Gateway%20%C2%B7%20ECR%20%C2%B7%20SQS-FF9900?logo=amazonaws&logoColor=white)
+![GitHub Actions](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)
 
 ---
 
-## A solução
+## Sumário
 
-A **Oficina** é uma plataforma de gestão de oficina mecânica distribuída em **6 repositórios** que compõem um único sistema na AWS. O cliente acessa uma API Gateway que autentica na borda e encaminha o tráfego para três microsserviços .NET 10 em EKS, que se comunicam por HTTP e por filas SQS FIFO e persistem em um RDS SQL Server compartilhado.
-
-| Repositório | Responsabilidade |
-|---|---|
-| [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4) | Rede, banco de dados, segredos e estado do Terraform |
-| **oficina-infra** *(este)* | Plataforma EKS e entrypoint de API |
-| [oficina-auth-lambda](https://github.com/fabianorodrigues/oficina-auth-lambda-fiap-fase4) | Autenticação por CPF e emissão de token |
-| [oficina-cadastro](https://github.com/fabianorodrigues/oficina-cadastro-fiap-fase4) | Clientes, veículos, funcionários e catálogo de serviços |
-| [oficina-estoque](https://github.com/fabianorodrigues/oficina-estoque-fiap-fase4) | Peças, insumos, saldos e reservas |
-| [oficina-ordens-servico](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4) | Ordens de serviço, orçamento e saga de pagamento |
+- [Visão geral](#visão-geral)
+- [Ordem de deploy da solução](#ordem-de-deploy-da-solução)
+- [Arquitetura](#arquitetura)
+- [O que consome e o que publica](#o-que-consome-e-o-que-publica)
+- [Configuração](#configuração)
+- [Como executar](#como-executar)
+- [Validação](#validação)
+- [Observabilidade](#observabilidade)
+- [Execução local](#execução-local)
+- [Limitações conhecidas](#limitações-conhecidas)
+- [Próximas etapas](#próximas-etapas)
 
 ---
 
-## Ordem de deploy
+## Visão geral
+
+A **Oficina** é uma plataforma de gestão de oficina mecânica implantada na AWS e distribuída em **6 repositórios** que compõem um único sistema. O cliente acessa uma **API Gateway HTTP**, que autentica na borda por uma **Lambda authorizer** e encaminha o tráfego, via **VPC Link**, para um **ALB interno** que roteia para três microsserviços **.NET 10 em ECS Fargate**. Os serviços se comunicam por HTTP interno e por filas **SQS FIFO**, e persistem em um **RDS SQL Server** compartilhado.
+
+| Repositório | Responsabilidade | Etapas |
+|---|---|:---:|
+| [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4) | Rede, banco de dados, segredos e estado do Terraform | 1 e 3 |
+| **oficina-infra** *(este)* | Plataforma ECS/ALB e entrada de API | 2, 6 e 7 |
+| [oficina-auth-lambda](https://github.com/fabianorodrigues/oficina-auth-lambda-fiap-fase4) | Autenticação por CPF e validação de token | 4 |
+| [oficina-cadastro](https://github.com/fabianorodrigues/oficina-cadastro-fiap-fase4) | Clientes, veículos, funcionários e catálogo de serviços | 5 |
+| [oficina-estoque](https://github.com/fabianorodrigues/oficina-estoque-fiap-fase4) | Peças, insumos, saldos e reservas | 5 |
+| [oficina-ordens-servico](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4) | Ordens de serviço, orçamento e saga de pagamento | 5 e 8 |
+
+**Papel deste repositório:** contém dois stacks Terraform independentes. O **`platform`** (etapa 2) cria a infraestrutura onde os serviços rodam. O **`entrypoint`** (etapa 6) cria a fachada pública da API, que só pode ser aplicada depois que as Lambdas de autenticação e os três serviços estiverem no ar.
+
+---
+
+## Ordem de deploy da solução
 
 | # | Repositório | Workflow | Confirmação |
-|---|---|---|---|
+|:---:|---|---|:---:|
 | 1 | oficina-infra-db | Database Infrastructure Deploy | `APPLY` |
 | **2** | **oficina-infra** | **Platform Deploy** | `APPLY` |
 | 3 | oficina-infra-db | Database Bootstrap | `BOOTSTRAP` |
 | 4 | oficina-auth-lambda | Auth Deploy | `DEPLOY` |
 | 5 | cadastro · estoque · ordens-servico | Deploy | `DEPLOY` |
 | **6** | **oficina-infra** | **Entrypoint Deploy** | `APPLY` |
-| **7** | **oficina-infra** | **Observability Validate** | `VALIDATE` |
+| **7** | **oficina-infra** | **Observability Validate** | — |
 | 8 | oficina-ordens-servico | AWS E2E Validate | `VALIDATE` |
 
-> **Este repositório contém dois stacks independentes, executados em momentos distintos.** O **Platform Deploy** (etapa 2) cria a infraestrutura que os serviços precisam para existir. O **Entrypoint Deploy** (etapa 6) só pode rodar **depois** que as Lambdas de autenticação e os três microsserviços estiverem no ar, porque publica as rotas que apontam para eles e valida a saúde de cada destino antes de aplicar.
-
----
-
-## Responsabilidade
-
-### Stack `platform` — etapa 2
-
-| Recurso | Detalhe |
-|---|---|
-| **EKS** | Cluster e namespace da aplicação, com logs de painel de controle habilitados |
-| **Node group** | Grupo gerenciado em subnets privadas, sob demanda, escala de 1 a 2 nós |
-| **Addons** | VPC CNI, CoreDNS e kube-proxy; agente de Pod Identity somente quando houver role específica opcional |
-| **Helm** | Controlador de balanceador, driver CSI de segredos e o provedor AWS do CSI |
-| **ECR** | 3 repositórios de imagem, com tags imutáveis, varredura ao enviar e retenção das 20 últimas |
-| **SQS** | 4 filas FIFO — comandos e eventos, cada uma com sua fila de mensagens mortas |
-| **IAM** | Roles externas para cluster e node group; controller e workloads usam credenciais da node role |
-
-### Stack `entrypoint` — etapa 6
-
-| Recurso | Detalhe |
-|---|---|
-| **Ingress e ALB** | Balanceador interno criado via Kubernetes, não exposto à internet |
-| **API Gateway** | HTTP API com estágio padrão, publicação automática e limite de requisições |
-| **VPC Link** | Ligação privada entre a API Gateway e o balanceador interno |
-| **Authorizer** | Autorizador Lambda do tipo requisição, sem cache de resultado |
-| **Rotas** | Rotas explícitas por recurso — não há rota curinga |
-| **Log group** | Log de acesso da API com retenção de 14 dias e campos sensíveis omitidos |
+> [!IMPORTANT]
+> O **Platform Deploy** (etapa 2) cria o cluster ECS, o ALB e os *target groups*, mas **não cria os serviços** — cada serviço se registra no seu *target group* ao ser publicado na etapa 5. O **Entrypoint Deploy** (etapa 6) valida a saúde de cada destino antes de aplicar, por isso só roda **depois** das etapas 4 e 5.
 
 ---
 
 ## Arquitetura
 
-### Plataforma (etapa 2)
+### Stack `platform` — etapa 2
 
 ```mermaid
 flowchart TB
-    subgraph EKS["Cluster EKS"]
+    subgraph Plataforma["Cluster ECS Fargate + ALB interno"]
         direction TB
-        NG["Node group gerenciado<br/>subnets privadas, 1 a 2 nós"]
-        Addons["Addons<br/>CNI, CoreDNS, kube-proxy"]
-        Helm["Helm<br/>controlador de balanceador + CSI de segredos"]
+        Cluster["ECS Cluster<br/>Container Insights"]
+        ALB["ALB interno<br/>listener HTTP + regras por path"]
+        TG["3 target groups<br/>cadastro · estoque · ordens"]
+        ALB --> TG
     end
 
-    ECR["ECR<br/>cadastro · estoque · ordens"]
-    SQS["SQS FIFO<br/>comandos + eventos + filas mortas"]
-    IAM["IAM<br/>cluster role externa + node role externa"]
-    SSM["SSM<br/>16 parâmetros publicados"]
+    ECR["ECR<br/>cadastro · estoque · ordens · db-bootstrap"]
+    SQS["SQS FIFO<br/>comandos + eventos + DLQs"]
+    Logs["CloudWatch Logs<br/>1 grupo por serviço"]
+    SSM["SSM<br/>parâmetros publicados"]
 
-    IAM --> EKS
-    EKS --> SSM
+    Cluster --> SSM
+    ALB --> SSM
     ECR --> SSM
     SQS --> SSM
+    Logs --> SSM
+
+    classDef infra fill:#FF9900,stroke:#b36b00,color:#111
+    classDef pub fill:#1f6feb,stroke:#0b3d91,color:#fff
+    class Cluster,ALB,TG,ECR,SQS,Logs infra
+    class SSM pub
 ```
 
-### Entrypoint (etapa 6)
+Cria: cluster ECS, ALB interno (listener HTTP, regras de roteamento por path e por *header* de saúde), *target groups* por serviço, grupos de segurança (ALB, tasks ECS e acesso das tasks ao RDS), grupos de log, 4 repositórios ECR (imutáveis, com varredura ao enviar e retenção das 20 últimas imagens) e 4 filas SQS FIFO (comandos e eventos, cada uma com sua *dead-letter queue*).
+
+### Stack `entrypoint` — etapa 6
 
 ```mermaid
 flowchart LR
     Cliente([Cliente HTTP]) --> API["API Gateway<br/>HTTP API"]
 
-    API -->|"POST login"| AuthCpf["Lambda<br/>auth-cpf"]
+    API -->|"POST /api/auth/cpf"| AuthCpf["Lambda<br/>auth-cpf"]
     API -->|"valida token"| Authorizer["Lambda<br/>authorizer"]
-    Authorizer -.->|"claims do token"| API
+    Authorizer -.->|"claims"| API
 
-    API -->|"VPC Link"| ALB["ALB interno"]
+    API -->|"VPC Link"| ALB["ALB interno<br/>(criado pela plataforma)"]
     ALB --> Cadastro["oficina-cadastro"]
     ALB --> Estoque["oficina-estoque"]
     ALB --> Ordens["oficina-ordens-servico"]
+
+    classDef edge fill:#1f6feb,stroke:#0b3d91,color:#fff
+    classDef svc fill:#2da44e,stroke:#166534,color:#fff
+    class API,AuthCpf,Authorizer edge
+    class Cadastro,Estoque,Ordens svc
 ```
 
-O autorizador valida o token na borda e devolve as claims. A API Gateway as converte em cabeçalhos de identidade (`x-oficina-user-id`, `x-oficina-user-cpf`, `x-oficina-user-role`, `x-oficina-user-name`, `x-oficina-token-jti`) e os injeta na requisição encaminhada ao balanceador. Os três serviços materializam esses cabeçalhos como claims e aplicam suas políticas de autorização por perfil.
-
-Esse desenho concentra a validação do token em um único ponto: os serviços não lidam com chave de assinatura nem com expiração. Em contrapartida, os cabeçalhos só são confiáveis enquanto o balanceador permanecer interno e o acesso restrito ao VPC Link — a regra de entrada não deve ser ampliada.
+O autorizador valida o token na borda e devolve as *claims*. A API Gateway as converte em cabeçalhos de identidade (`x-oficina-user-id`, `x-oficina-user-cpf`, `x-oficina-user-role`, `x-oficina-user-name`, `x-oficina-token-jti`) e os injeta na requisição encaminhada ao ALB. Os cabeçalhos são confiáveis porque o balanceador é interno e o acesso está restrito ao VPC Link. As rotas são explícitas por recurso — não há rota curinga.
 
 ---
 
-## Contrato de integração
+## O que consome e o que publica
 
 ### Consome
 
-| Origem | Valores |
-|---|---|
-| oficina-infra-db | VPC, subnets públicas e privadas, grupo de segurança e segredo master do RDS |
-| oficina-infra-db | Os 7 segredos de banco, que precisam existir antes do Platform Deploy |
-| oficina-auth-lambda | Nome e alias das duas funções de autenticação *(apenas no Entrypoint Deploy)* |
+| Origem | Valores | Usado em |
+|---|---|---|
+| oficina-infra-db | VPC, subnets, grupo de segurança e segredos de banco | Platform Deploy |
+| oficina-auth-lambda | Nome e alias `live` das duas funções de autenticação | Entrypoint Deploy |
 
 ### Publica
 
 | Recurso | Caminho | Consumido por |
 |---|---|---|
-| Cluster | `/oficina/infra/cluster/{name,namespace,arn,endpoint,security-group-id}` | os três serviços, bootstrap, auth |
-| Registros de imagem | `/oficina/infra/ecr/{cadastro,estoque,ordens}` | os três serviços |
-| Filas de comandos | `/oficina/infra/sqs/estoque-comandos/{url,arn}` e a fila morta correspondente | estoque, ordens |
-| Filas de eventos | `/oficina/infra/sqs/ordens-eventos/{url,arn}` e a fila morta correspondente | estoque, ordens |
-| API | `/oficina/infra/api/{id,url,execution-arn,stage,vpc-link-id}` | validação ponta a ponta |
+| Cluster ECS | `/oficina/infra/cluster/{name,arn}` | serviços, bootstrap |
+| Grupo de segurança das tasks | `/oficina/infra/ecs/task-security-group-id` | serviços, bootstrap |
+| ALB interno | `/oficina/infra/alb/{name,arn,dns-name,listener-arn,security-group-id}` | serviços, entrypoint |
+| Target groups | `/oficina/infra/ecs/{cadastro,estoque,ordens}/target-group-arn` | serviços |
+| Grupos de log | `/oficina/infra/ecs/{cadastro,estoque,ordens}/log-group-name` | serviços |
+| Registros de imagem | `/oficina/infra/ecr/{cadastro,estoque,ordens,db-bootstrap}` | serviços, bootstrap |
+| Filas SQS | `/oficina/infra/sqs/{estoque-comandos,ordens-eventos}[-dlq]/{url,arn}` | estoque, ordens |
+| API Gateway | `/oficina/infra/api/{id,url,execution-arn,stage,vpc-link-id}` | validação ponta a ponta |
 
-O acoplamento entre repositórios é feito **por nome de parâmetro no SSM**. Não há leitura de estado entre stacks: cada stack lê apenas o que o anterior publicou.
+O acoplamento é feito **por nome de parâmetro no SSM**. Cada stack lê apenas o que o anterior publicou.
 
 ---
 
 ## Configuração
 
-Configure em **Repository → Settings → Secrets and variables → Actions** do repositório.
+Configure em **Settings → Secrets and variables → Actions** do repositório.
 
-### Secrets (obrigatórios)
+### Secrets
 
-| Secret | Uso |
-|---|---|
-| `AWS_ACCESS_KEY_ID` · `AWS_SECRET_ACCESS_KEY` · `AWS_SESSION_TOKEN` | Credenciais temporárias da AWS |
+| Secret | Uso | Obrigatório |
+|---|---|:---:|
+| `AWS_ACCESS_KEY_ID` · `AWS_SECRET_ACCESS_KEY` · `AWS_SESSION_TOKEN` | Credenciais temporárias da AWS | **Sim** |
 
 ### Variables
 
-| Variable | Obrigatória | Uso |
-|---|---|---|
-| `AWS_REGION` | **Sim** | Região de todos os recursos. Os workflows abortam se estiver vazia |
-| `TF_STATE_BUCKET` | Não | Apenas compatibilidade com um bucket de estado pré-existente |
-| `PLATFORM_IAM_ROLES_JSON` | Sim, quando o Platform Deploy reutilizar roles externas | ARNs das roles externas do cluster e do node group |
-
-### Roles IAM externas
-
-Configure `PLATFORM_IAM_ROLES_JSON` como **Repository Variable** para reutilizar a cluster role externa e a node role externa. ARN de role não é secret.
-
-```json
-{
-  "eks_cluster_role_arn": "<ARN_DA_ROLE_DO_CLUSTER>",
-  "eks_node_group_role_arn": "<ARN_DA_ROLE_DO_NODE_GROUP>"
-}
-```
-
-Com essas duas ARNs, o EKS usa roles externas para o cluster e os nodes. O AWS Load Balancer Controller, os serviços, os migrators e o bootstrap dos bancos usam as credenciais da node role pela cadeia padrão de credenciais AWS. Nenhuma role adicional de Pod Identity é obrigatória.
-
-Campos opcionais `load_balancer_controller_role_arn` e `workload_role_arn` continuam aceitos para uso futuro com Pod Identity. Quando eles não são informados, o Terraform não cria role, policy, attachment, associação Pod Identity, OIDC provider ou annotation IRSA para esses componentes.
-
-| Campo | Obrigatório quando | Componente | Trust esperado |
-|---|---|---|---|
-| `eks_cluster_role_arn` | O Platform Deploy reutilizar role externa | EKS cluster | `eks.amazonaws.com` com `sts:AssumeRole` |
-| `eks_node_group_role_arn` | O Platform Deploy reutilizar role externa | EKS node group, controller, workloads, migrators e bootstrap | `ec2.amazonaws.com` com `sts:AssumeRole` |
-
-Obtenha o ARN de uma role existente com:
-
-```powershell
-aws iam get-role `
-  --role-name "<ROLE_NAME>" `
-  --query "Role.Arn" `
-  --output text
-```
-
-A node role precisa manter as permissões base dos nodes EKS, pull de imagens no ECR, leitura dos segredos e parâmetros usados pelos pods, ações SQS dos serviços e permissões core da policy oficial do AWS Load Balancer Controller v3.4.1 para criar e reconciliar ALB, target groups, listeners, listener rules, tags e security groups. Caso segredos ou parâmetros usem chave KMS gerenciada pela conta, inclua também a descriptografia necessária.
-
-Essa configuração é mais simples e compatível com contas com IAM restrito, porque o Platform Deploy não precisa criar roles adicionais para pods. O trade-off é menor isolamento: controller, serviços, migrators e bootstrap compartilham as permissões da node role. Para produção, prefira uma role por workload via Pod Identity ou IRSA quando a conta permitir esse desenho.
+| Variable | Uso | Obrigatório |
+|---|---|:---:|
+| `AWS_REGION` | Região de todos os recursos. Os workflows abortam se estiver vazia | **Sim** |
+| `TF_STATE_BUCKET` | Compatibilidade com um bucket de estado pré-existente | Não |
 
 ### O que é provisionado automaticamente
 
-Toda a infraestrutura deste repositório é criada pelos workflows, e **todas as variáveis do Terraform têm valor padrão**. Nesta estratégia, o Platform Deploy deve ser executado com `PLATFORM_IAM_ROLES_JSON` apontando para uma cluster role externa e uma node role externa compatível. Para AWS Load Balancer Controller e workloads, a ausência de role específica significa uso das credenciais da node role. O chart do AWS Load Balancer Controller fica fixado por padrão em `3.4.1`; os demais charts opcionais ficam em branco para que o Helm resolva a versão mais recente.
+Toda a infraestrutura deste repositório é criada pelos workflows, e **todas as variáveis do Terraform têm valor padrão**. A forma dos recursos (nomes, portas, retenção do ECR, tempos das filas, rotas da API) vem dos arquivos em `config/`, versionados junto ao código — ajustes são feitos por pull request, não por *variables* do GitHub.
 
-A forma dos recursos vem dos arquivos em `config/` (nomes, dimensionamento do node group, retenção do ECR, tempos das filas, rotas da API), versionados junto ao código. Ajustes de plataforma são feitos por pull request nesses arquivos, não por variables do GitHub.
+> [!NOTE]
+> O stack `platform` **não cria papéis IAM**. Os serviços ECS assumem as roles de execução e de aplicação informadas nos próprios deploys de cadastro, estoque e ordens (variáveis `ECS_TASK_EXECUTION_ROLE_ARN` e `ECS_TASK_ROLE_ARN`, documentadas naqueles repositórios).
 
-> **Pré-requisito não provisionado aqui:** o bucket S3 de estado do Terraform. Ele é criado na **etapa 1**, pelo `Database Infrastructure Deploy` do repositório [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4). Os workflows deste repositório verificam a existência do bucket e **falham imediatamente** se ele não existir. Os 7 segredos de banco e os 7 parâmetros de rede da etapa 1 também são verificados antes do plano.
+> [!WARNING]
+> **Pré-requisito não provisionado aqui:** o bucket S3 de estado do Terraform, criado na **etapa 1** por [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4). Os workflows deste repositório verificam sua existência e **falham imediatamente** se ele não existir. Os segredos e parâmetros da etapa 1 também são verificados antes do plano.
 
 ---
 
-## Executar pelo GitHub Actions
+## Como executar
 
-Todos os workflows rodam apenas na branch `main` e exigem uma string de confirmação **sensível a maiúsculas**.
+Todos os workflows rodam apenas na branch `main` e exigem uma confirmação **sensível a maiúsculas**.
 
-### Platform Deploy — etapa 2
+### Etapa 2 — Platform Deploy
 
 **Actions → Platform Deploy → Run workflow → `confirmation` = `APPLY`**
 
-Verifica o bucket de estado e os parâmetros da etapa 1 → valida o plano → aplica → aguarda o cluster e os nós ficarem ativos → confere addons e releases Helm. Um passo de segurança **interrompe o deploy se o plano previr exclusão ou substituição** de cluster, node group, repositório de imagem, fila, papel IAM, parâmetro ou segredo.
+Verifica o bucket de estado e os parâmetros da etapa 1 → valida o plano → aplica → confirma que o cluster está `ACTIVE`, o ALB é interno e os *target groups* e grupos de log existem. Um passo de segurança **interrompe o deploy se o plano previr exclusão** de cluster, ALB, *target group*, listener, ECR, fila, grupo de segurança, grupo de log ou parâmetro.
 
-Duração típica: 20 a 35 minutos, dominada pela criação do cluster.
+Duração típica: 5 a 10 minutos.
 
-### Entrypoint Deploy — etapa 6
+### Etapa 6 — Entrypoint Deploy
 
-Execute **apenas depois** das etapas 4 e 5. O workflow tem duas fases em uma única execução:
-
-1. **Ingress** — confere que os três serviços respondem no cluster, aplica o Ingress, aguarda o balanceador ficar ativo e todos os destinos saudáveis.
-2. **API Gateway** — confere que as Lambdas têm o alias publicado, aplica o stack e aguarda o VPC Link ficar disponível.
+Execute **apenas depois** das etapas 4 e 5.
 
 **Actions → Entrypoint Deploy → Run workflow → `confirmation` = `APPLY`**
 
-Se a fase 1 falhar por destino não saudável, a causa quase sempre está na etapa 5: algum serviço não subiu ou não passou na verificação de saúde.
+Valida o ALB da plataforma (interno, listener HTTP, *target groups*) e as Lambdas de autenticação (com alias `live`) → valida o plano → aplica a API Gateway, o VPC Link e as integrações → aguarda o VPC Link ficar `AVAILABLE` → executa validação somente leitura e teste de fumaça na API. Se falhar por destino não saudável, a causa quase sempre está na etapa 5.
 
-### Observability Validate — etapa 7
+### Etapa 7 — Observability Validate
 
-**Actions → Observability Validate → Run workflow → `confirmation` = `VALIDATE`**
+**Actions → Observability Validate → Run workflow**
 
-Somente leitura — não altera nada. Verifica o cluster, os addons, os nós, os deployments, a existência dos grupos de log e responde às verificações de saúde dos três serviços pela API pública.
+Não exige confirmação e é **somente leitura**. Verifica o cluster ECS, a existência dos grupos de log (serviços, bootstrap e API Gateway) e a presença das métricas de ECS e do ALB no CloudWatch.
 
 ---
 
-## Validar
+## Validação
 
 ### Pelo Console AWS
 
 | Serviço | O que verificar |
 |---|---|
-| **EKS** | Cluster `Active`, node group `Active`, addons base `Active`; Pod Identity Agent apenas quando houver role específica opcional |
-| **ECR** | 3 repositórios, com imagem enviada após a etapa 5 |
-| **SQS** | 4 filas FIFO, cada fila principal com política de redirecionamento para a fila morta |
+| **ECS** | Cluster `ACTIVE` com Container Insights; após a etapa 5, 3 serviços com tasks em execução |
+| **EC2 → Load Balancers** | ALB com esquema **interno** e destinos saudáveis |
+| **ECR** | 4 repositórios, com imagem enviada após as etapas 3 e 5 |
+| **SQS** | 4 filas FIFO, cada fila principal com política de redirecionamento para a DLQ |
 | **API Gateway** | HTTP API com estágio padrão, autorizador do tipo requisição e VPC Link `Available` |
-| **EC2 → Load Balancers** | Balanceador com esquema **interno** e destinos saudáveis |
-| **CloudWatch → Log groups** | Log de acesso da API presente |
+| **CloudWatch → Log groups** | Grupos `/ecs/oficina/*` e `/aws/apigateway/oficina-api` presentes |
 
 ### Pela AWS CLI
 
@@ -246,30 +220,29 @@ Somente leitura — não altera nada. Verifica o cluster, os addons, os nós, os
 
 ```bash
 REGIAO=<sua-regiao>
+
+# Cluster e serviços ECS
 CLUSTER=$(aws ssm get-parameter --name /oficina/infra/cluster/name \
   --region "$REGIAO" --query 'Parameter.Value' --output text)
+aws ecs describe-clusters --clusters "$CLUSTER" --region "$REGIAO" \
+  --query 'clusters[0].status' --output text
+aws ecs list-services --cluster "$CLUSTER" --region "$REGIAO" --output table
 
-# Cluster e nós
-aws eks describe-cluster --name "$CLUSTER" --region "$REGIAO" \
-  --query 'cluster.status' --output text
-aws eks update-kubeconfig --name "$CLUSTER" --region "$REGIAO"
-kubectl get nodes
-kubectl get pods -n oficina
-
-# Filas FIFO
-aws sqs list-queues --region "$REGIAO" --query 'QueueUrls' --output table
-
-# Parâmetros publicados
-aws ssm get-parameters-by-path --path /oficina/infra --recursive \
-  --region "$REGIAO" --query 'Parameters[].Name' --output table
+# ALB interno e saúde dos destinos
+for s in cadastro estoque ordens; do
+  TG=$(aws ssm get-parameter --name "/oficina/infra/ecs/$s/target-group-arn" \
+    --region "$REGIAO" --query 'Parameter.Value' --output text)
+  echo -n "$s -> "
+  aws elbv2 describe-target-health --target-group-arn "$TG" --region "$REGIAO" \
+    --query 'TargetHealthDescriptions[].TargetHealth.State' --output text
+done
 
 # Verificação de saúde pela API pública (após a etapa 6)
 API=$(aws ssm get-parameter --name /oficina/infra/api/url \
   --region "$REGIAO" --query 'Parameter.Value' --output text)
 for s in cadastro estoque ordens; do
-  echo "$s -> $(curl -s -o resposta.tmp -w '%{http_code}' "$API/health/$s")"
+  echo "$s -> $(curl -s -o /dev/null -w '%{http_code}' "$API/health/$s")"
 done
-rm -f resposta.tmp
 ```
 
 </details>
@@ -282,21 +255,20 @@ O que está efetivamente ativo hoje:
 
 | Sinal | Onde |
 |---|---|
-| Log de acesso da API | Grupo de log da API Gateway, retenção de 14 dias, sem token, corpo ou dados pessoais |
-| Logs do painel de controle do EKS | Grupo de log do cluster |
-| Logs das Lambdas | Um grupo de log por função, retenção de 14 dias |
-| Rastreamento distribuído | X-Ray ativo nas Lambdas de autenticação |
-| Métricas | Métricas detalhadas do estágio da API e métricas padrão de EKS, RDS e SQS |
+| Logs das tasks ECS | Grupos `/ecs/oficina/{cadastro,estoque,ordens,db-bootstrap}` |
+| Log de acesso da API | Grupo `/aws/apigateway/oficina-api`, retenção de 14 dias, sem dados sensíveis |
+| Métricas de contêiner | Container Insights no cluster ECS |
+| Métricas de plataforma | `AWS/ECS` e `AWS/ApplicationELB` no CloudWatch |
+| Rastreamento distribuído | X-Ray nas Lambdas de autenticação |
 
-Use o **Observability Validate** (etapa 7) para conferir automaticamente que cluster, grupos de log e verificações de saúde estão íntegros.
-
-> **Estado atual:** o coletor OpenTelemetry e o agente de APM existem como código Helm neste repositório, mas estão **desligados por configuração** e não são implantados. Também **não há painéis, alarmes, tópicos de notificação nem Container Insights**. A observabilidade em vigor é a descrita na tabela acima.
+> [!NOTE]
+> **Não há painéis, alarmes, tópicos de notificação nem coletor OpenTelemetry.** A observabilidade em vigor é a descrita acima. Use o **Observability Validate** (etapa 7) para conferir automaticamente que cluster, grupos de log e métricas estão presentes.
 
 ---
 
-## Executar localmente
+## Execução local
 
-Não há execução local de infraestrutura: alterações são aplicadas apenas pelos workflows, para manter o estado do Terraform consistente. A validação estática local reproduz o que a CI executa:
+Não há execução local de infraestrutura: alterações são aplicadas apenas pelos workflows. A validação estática local reproduz o que a CI executa:
 
 ```bash
 # Plataforma
@@ -311,20 +283,18 @@ terraform init -backend=false
 terraform validate
 ```
 
-A CI adiciona análise de lint, verificação de política, renderização dos manifestos contra um cluster descartável e checagens de segurança estática. Nenhum recurso da AWS é acessado em pull request.
-
 ---
 
 ## Limitações conhecidas
 
-- **Sem aprovação manual nos deploys.** O controle é a branch `main` mais a string de confirmação; não há GitHub Environments nem revisores obrigatórios.
-- **Credenciais estáticas.** Os workflows usam chave de acesso com token de sessão em vez de federação OIDC.
-- **Node group pequeno e sem escala automática de pods.** De 1 a 2 nós, e os serviços rodam com réplica única por decisão de projeto.
-- **Sem pipeline de remoção.** A retirada dos recursos não é automatizada, e as verificações de segurança bloqueiam operações destrutivas nos workflows.
+- **Sem aprovação manual nos deploys.** O controle é a branch `main` mais a confirmação; não há GitHub Environments nem revisores obrigatórios.
+- **Credenciais estáticas** com token de sessão, em vez de federação OIDC.
+- **Serviços com réplica única** (`desiredCount = 1`), sem escala automática, por decisão de projeto.
+- **Sem pipeline de remoção.** As verificações de segurança bloqueiam operações destrutivas nos workflows.
 
 ---
 
-## Próxima etapa
+## Próximas etapas
 
 - Após o **Platform Deploy** (etapa 2) → volte a [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4) para o **Database Bootstrap** (etapa 3).
 - Após o **Entrypoint Deploy** (etapa 6) → execute o **Observability Validate** (etapa 7) e conclua em [oficina-ordens-servico](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4) com o **AWS E2E Validate** (etapa 8).
