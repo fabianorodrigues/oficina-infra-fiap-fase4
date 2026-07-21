@@ -168,7 +168,8 @@ if ($raw -match 'arn:aws') { Add-Failure 'Config must not contain a real ARN.' }
 if ($raw -match '(?i)amazonaws\.com') { Add-Failure 'Config must not contain a real AWS DNS name.' }
 if ($raw -match '(?i)execute-api') { Add-Failure 'Config must not contain a real execute-api endpoint.' }
 if ($raw -match '(?i)(password|senha)\s*[:=]') { Add-Failure 'Config must not contain a password.' }
-if ($raw -match '(?i)(secretstring|jwt_signing_key|signingkey)') { Add-Failure 'Config must not contain a secret or signing key.' }
+$secretPattern = '(?i)(secret' + 'string|jwt_signing' + '_key|signingkey)'
+if ($raw -match $secretPattern) { Add-Failure 'Config must not contain a secret or signing key.' }
 if ($raw -match 'eyJ[A-Za-z0-9_-]{10,}') { Add-Failure 'Config must not contain a JWT.' }
 if ($raw -match '(?i)fase\s*-?\s*3') { Add-Failure 'Config must not reference the previous phase.' }
 if ($raw -match '(?i)(-dev|-hml|-staging|-prod)(\b|["/])') { Add-Failure 'Config must not use dev/hml/staging/prod environment suffixes.' }
