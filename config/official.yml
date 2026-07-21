@@ -35,9 +35,6 @@ sqs:
   messageRetentionSeconds: 345600
   dlqRetentionSeconds: 1209600
 
-workloadIdentity:
-  mode: pod-identity
-
 observability:
   enableNewRelic: false
   newRelicSecretName: /oficina/observability/new-relic

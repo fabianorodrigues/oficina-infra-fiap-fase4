@@ -16,7 +16,7 @@ variable "cluster_enabled_log_types" {
 }
 
 variable "load_balancer_controller_chart_version" {
-  description = "Chart version for AWS Load Balancer Controller. Keep aligned with the IAM policy embedded in iam.tf."
+  description = "Chart version for AWS Load Balancer Controller."
   type        = string
   default     = "3.4.1"
 }
@@ -46,7 +46,7 @@ variable "newrelic_chart_version" {
 }
 
 variable "platform_iam_roles" {
-  description = "Optional existing IAM role ARNs for accounts where selected platform roles are provided outside Terraform."
+  description = "Optional existing IAM role ARNs provided outside Terraform."
   type = object({
     eks_cluster_role_arn              = optional(string, "")
     eks_node_group_role_arn           = optional(string, "")

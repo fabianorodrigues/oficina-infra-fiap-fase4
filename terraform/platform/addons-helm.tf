@@ -19,7 +19,7 @@ resource "helm_release" "aws_load_balancer_controller" {
 
   depends_on = [
     aws_eks_node_group.this,
-    aws_iam_role_policy_attachment.load_balancer_controller,
+    aws_eks_pod_identity_association.load_balancer_controller,
     kubernetes_service_account.load_balancer_controller
   ]
 }

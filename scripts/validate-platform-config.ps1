@@ -28,7 +28,6 @@ $combined = "$official`n$contract"
 if ($official -notmatch '(?ms)^project:\s+.*?^\s{2}name: oficina\s*$') { Fail "project.name must be oficina." }
 if ($official -notmatch '(?ms)^cluster:\s+.*?^\s{2}name: oficina\s*$') { Fail "cluster.name must be oficina." }
 if ($official -notmatch '(?ms)^cluster:\s+.*?^\s{2}namespace: oficina\s*$') { Fail "cluster.namespace must be oficina." }
-if ($official -notmatch '(?m)^\s{2}mode: (pod-identity|irsa)\s*$') { Fail "workloadIdentity.mode must be pod-identity or irsa." }
 if ($official -notmatch '(?ms)^observability:\s+.*?^\s{2}enableNewRelic: false\s*$') { Fail "observability.enableNewRelic must start as false." }
 
 $kubernetesVersionMatch = [regex]::Match($official, '(?m)^\s{2}kubernetesVersion:\s*"?([^"\r\n]*)"?\s*$')

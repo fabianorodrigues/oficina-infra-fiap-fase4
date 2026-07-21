@@ -385,10 +385,61 @@ function Add-PolicyDocumentActions {
     }
 }
 
+function Get-RequiredActionName {
+    param([object]$RequiredAction)
+
+    if ($RequiredAction -is [string]) {
+        return $RequiredAction
+    }
+
+    $action = [string](Get-PropertyValue $RequiredAction 'Action')
+    if ([string]::IsNullOrWhiteSpace($action)) {
+        return [string]$RequiredAction
+    }
+
+    return $action
+}
+
+function Add-MissingPermissionResult {
+    param(
+        [object]$RequiredAction,
+        [string]$RoleName,
+        [string]$Component,
+        [string]$Field,
+        [bool]$AsWarning
+    )
+
+    $action = Get-RequiredActionName -RequiredAction $RequiredAction
+    $consumer = [string](Get-PropertyValue $RequiredAction 'Consumer')
+    $impact = [string](Get-PropertyValue $RequiredAction 'Impact')
+
+    if ([string]::IsNullOrWhiteSpace($consumer)) {
+        $consumer = $Component
+    }
+
+    if ([string]::IsNullOrWhiteSpace($impact)) {
+        $impact = "The component may fail when it calls $action."
+    }
+
+    $message = @(
+        "Permissao ausente: $action"
+        "Componente consumidor: $consumer"
+        "Role que precisa possuir a permissao: configured by $Field"
+        "Impacto esperado: $impact"
+        "Campo de configuracao: $Field"
+    ) -join ' | '
+
+    if ($AsWarning) {
+        Add-WarningMessage $message
+    } else {
+        Add-Failure $message
+    }
+}
+
 function Test-RolePolicyActions {
     param(
         [string]$RoleName,
-        [string[]]$RequiredActions,
+        [object[]]$RequiredActions,
         [string]$Field,
         [string]$Component
     )
@@ -433,16 +484,75 @@ function Test-RolePolicyActions {
     }
 
     $missing = @()
-    foreach ($required in $RequiredActions) {
+    foreach ($requiredAction in $RequiredActions) {
+        $required = Get-RequiredActionName -RequiredAction $requiredAction
         if (-not (Test-ActionMatch @($actions) $required)) {
-            $missing += $required
+            $missing += $requiredAction
         }
     }
 
     if ($missing.Count -gt 0 -and $unreadablePolicies -eq 0) {
-        Add-Failure "Component '$Component' uses field '$Field', but readable role policies do not include required actions: $($missing -join ', ')."
+        foreach ($missingAction in $missing) {
+            $severity = [string](Get-PropertyValue $missingAction 'Severity')
+            Add-MissingPermissionResult -RequiredAction $missingAction -RoleName $RoleName -Component $Component -Field $Field -AsWarning:($severity -eq 'Warning')
+        }
     } elseif ($missing.Count -gt 0) {
-        Add-WarningMessage "Could not fully confirm policy actions for component '$Component' field '$Field' because one or more policies were not readable. Missing actions from readable policies: $($missing -join ', ')."
+        $missingText = (@($missing | ForEach-Object { Get-RequiredActionName -RequiredAction $_ }) | Sort-Object -Unique) -join ', '
+        Add-WarningMessage "Could not fully confirm policy actions for component '$Component' field '$Field' because one or more policies were not readable. Missing actions from readable policies: $missingText."
+    }
+}
+
+function Test-RoleEffectiveActions {
+    param(
+        [string]$RoleArn,
+        [string]$RoleName,
+        [object[]]$RequiredActions,
+        [string]$Field,
+        [string]$Component
+    )
+
+    if ($RequiredActions.Count -eq 0) {
+        return
+    }
+
+    $requiredByAction = @{}
+    foreach ($requiredAction in $RequiredActions) {
+        $action = Get-RequiredActionName -RequiredAction $requiredAction
+        if (-not [string]::IsNullOrWhiteSpace($action)) {
+            $requiredByAction[$action.ToLowerInvariant()] = $requiredAction
+        }
+    }
+
+    $actionNames = @($requiredByAction.Keys | Sort-Object)
+    for ($i = 0; $i -lt $actionNames.Count; $i += 90) {
+        $end = [Math]::Min($i + 89, $actionNames.Count - 1)
+        $chunk = @($actionNames[$i..$end])
+
+        $result = Invoke-AwsJson -Arguments @(
+            @('iam', 'simulate-principal-policy', '--policy-source-arn', $RoleArn, '--action-names') +
+            $chunk +
+            @('--resource-arns', '*', '--output', 'json')
+        ) -Optional
+
+        if ($null -eq $result) {
+            Add-WarningMessage "Could not confirm effective policy decisions for component '$Component' field '$Field'."
+            continue
+        }
+
+        foreach ($evaluation in @($result.EvaluationResults)) {
+            if ([string]$evaluation.EvalDecision -eq 'allowed') {
+                continue
+            }
+
+            $action = ([string]$evaluation.EvalActionName).ToLowerInvariant()
+            if (-not $requiredByAction.ContainsKey($action)) {
+                continue
+            }
+
+            $requiredAction = $requiredByAction[$action]
+            $severity = [string](Get-PropertyValue $requiredAction 'Severity')
+            Add-MissingPermissionResult -RequiredAction $requiredAction -RoleName $RoleName -Component $Component -Field $Field -AsWarning:($severity -eq 'Warning')
+        }
     }
 }
 
@@ -571,6 +681,142 @@ if ([string]::IsNullOrWhiteSpace($CallerArn) -or [string]::IsNullOrWhiteSpace($C
 $callerPolicySourceArn = Get-CallerPolicySourceArn -Arn $CallerArn
 $callerPartition = Get-PartitionFromArn -Arn $CallerArn
 
+function New-RequiredAction {
+    param(
+        [string]$Action,
+        [string]$Consumer,
+        [string]$Impact,
+        [string]$Severity = 'Error'
+    )
+
+    @{
+        Action   = $Action
+        Consumer = $Consumer
+        Impact   = $Impact
+        Severity = $Severity
+    }
+}
+
+$nodeBaseRequiredActions = @(
+    New-RequiredAction 'eks:DescribeCluster' 'EKS nodes' 'Nodes may fail to join or operate in the cluster.'
+    New-RequiredAction 'ec2:DescribeInstances' 'EKS nodes' 'Node and pod networking discovery may fail.'
+    New-RequiredAction 'ec2:DescribeNetworkInterfaces' 'EKS nodes' 'VPC CNI may fail to inspect pod network interfaces.'
+    New-RequiredAction 'ec2:DescribeInstanceTypes' 'EKS nodes' 'VPC CNI may fail to inspect ENI and IP capacity.'
+    New-RequiredAction 'ec2:DescribeTags' 'EKS nodes' 'VPC CNI may fail to inspect required network tags.'
+    New-RequiredAction 'ec2:CreateNetworkInterface' 'EKS nodes' 'VPC CNI may fail to allocate pod networking.'
+    New-RequiredAction 'ec2:AttachNetworkInterface' 'EKS nodes' 'VPC CNI may fail to attach pod networking.'
+    New-RequiredAction 'ec2:DeleteNetworkInterface' 'EKS nodes' 'VPC CNI may fail to release pod networking.'
+    New-RequiredAction 'ec2:DetachNetworkInterface' 'EKS nodes' 'VPC CNI may fail to detach pod networking.'
+    New-RequiredAction 'ec2:ModifyNetworkInterfaceAttribute' 'EKS nodes' 'VPC CNI may fail to configure pod network interfaces.'
+    New-RequiredAction 'ec2:AssignPrivateIpAddresses' 'EKS nodes' 'VPC CNI may fail to assign pod IP addresses.'
+    New-RequiredAction 'ec2:UnassignPrivateIpAddresses' 'EKS nodes' 'VPC CNI may fail to release pod IP addresses.'
+    New-RequiredAction 'ec2:CreateTags' 'EKS nodes' 'VPC CNI may fail to tag pod network interfaces.'
+    New-RequiredAction 'ecr:GetAuthorizationToken' 'EKS nodes' 'Nodes may fail to authenticate to ECR.'
+    New-RequiredAction 'ecr:BatchCheckLayerAvailability' 'EKS nodes' 'Image pulls from ECR may fail.'
+    New-RequiredAction 'ecr:GetDownloadUrlForLayer' 'EKS nodes' 'Image pulls from ECR may fail.'
+    New-RequiredAction 'ecr:BatchGetImage' 'EKS nodes' 'Image pulls from ECR may fail.'
+)
+
+$loadBalancerControllerRequiredActions = @(
+    New-RequiredAction 'ec2:DescribeAccountAttributes' 'AWS Load Balancer Controller' 'The controller may fail account and networking discovery.'
+    New-RequiredAction 'ec2:DescribeAddresses' 'AWS Load Balancer Controller' 'The controller may fail address discovery.'
+    New-RequiredAction 'ec2:DescribeAvailabilityZones' 'AWS Load Balancer Controller' 'The controller may fail subnet and zone discovery.'
+    New-RequiredAction 'ec2:DescribeInternetGateways' 'AWS Load Balancer Controller' 'The controller may fail VPC discovery.'
+    New-RequiredAction 'ec2:DescribeVpcs' 'AWS Load Balancer Controller' 'The controller may fail VPC discovery.'
+    New-RequiredAction 'ec2:DescribeVpcPeeringConnections' 'AWS Load Balancer Controller' 'The controller may fail VPC peering discovery.'
+    New-RequiredAction 'ec2:DescribeSubnets' 'AWS Load Balancer Controller' 'The controller may fail subnet discovery for ALB placement.'
+    New-RequiredAction 'ec2:DescribeSecurityGroups' 'AWS Load Balancer Controller' 'The controller may fail security group discovery.'
+    New-RequiredAction 'ec2:DescribeInstances' 'AWS Load Balancer Controller' 'The controller may fail instance target discovery.'
+    New-RequiredAction 'ec2:DescribeNetworkInterfaces' 'AWS Load Balancer Controller' 'The controller may fail network interface discovery.'
+    New-RequiredAction 'ec2:DescribeTags' 'AWS Load Balancer Controller' 'The controller may fail tag-based resource discovery.'
+    New-RequiredAction 'ec2:GetCoipPoolUsage' 'AWS Load Balancer Controller' 'The controller may fail customer-owned IP pool discovery.'
+    New-RequiredAction 'ec2:DescribeCoipPools' 'AWS Load Balancer Controller' 'The controller may fail customer-owned IP pool discovery.'
+    New-RequiredAction 'ec2:GetSecurityGroupsForVpc' 'AWS Load Balancer Controller' 'The controller may fail VPC security group discovery.'
+    New-RequiredAction 'ec2:DescribeIpamPools' 'AWS Load Balancer Controller' 'The controller may fail IPAM pool discovery.'
+    New-RequiredAction 'ec2:DescribeRouteTables' 'AWS Load Balancer Controller' 'The controller may fail route table discovery.'
+    New-RequiredAction 'ec2:CreateSecurityGroup' 'AWS Load Balancer Controller' 'The controller may fail to create ALB security groups.'
+    New-RequiredAction 'ec2:AuthorizeSecurityGroupIngress' 'AWS Load Balancer Controller' 'The controller may fail to open required security group ingress.'
+    New-RequiredAction 'ec2:RevokeSecurityGroupIngress' 'AWS Load Balancer Controller' 'The controller may fail to reconcile security group ingress.'
+    New-RequiredAction 'ec2:DeleteSecurityGroup' 'AWS Load Balancer Controller' 'The controller may fail to clean up ALB security groups.'
+    New-RequiredAction 'ec2:CreateTags' 'AWS Load Balancer Controller' 'The controller may fail to tag ALB security groups.'
+    New-RequiredAction 'ec2:DeleteTags' 'AWS Load Balancer Controller' 'The controller may fail to reconcile ALB security group tags.'
+    New-RequiredAction 'elasticloadbalancing:DescribeLoadBalancers' 'AWS Load Balancer Controller' 'The controller may fail ALB discovery.'
+    New-RequiredAction 'elasticloadbalancing:DescribeLoadBalancerAttributes' 'AWS Load Balancer Controller' 'The controller may fail ALB attribute discovery.'
+    New-RequiredAction 'elasticloadbalancing:DescribeListeners' 'AWS Load Balancer Controller' 'The controller may fail listener discovery.'
+    New-RequiredAction 'elasticloadbalancing:DescribeListenerCertificates' 'AWS Load Balancer Controller' 'The controller may fail listener certificate discovery.'
+    New-RequiredAction 'elasticloadbalancing:DescribeSSLPolicies' 'AWS Load Balancer Controller' 'The controller may fail listener policy discovery.'
+    New-RequiredAction 'elasticloadbalancing:DescribeRules' 'AWS Load Balancer Controller' 'The controller may fail listener rule discovery.'
+    New-RequiredAction 'elasticloadbalancing:DescribeTargetGroups' 'AWS Load Balancer Controller' 'The controller may fail target group discovery.'
+    New-RequiredAction 'elasticloadbalancing:DescribeTargetGroupAttributes' 'AWS Load Balancer Controller' 'The controller may fail target group attribute discovery.'
+    New-RequiredAction 'elasticloadbalancing:DescribeTargetHealth' 'AWS Load Balancer Controller' 'The controller may fail target health discovery.'
+    New-RequiredAction 'elasticloadbalancing:DescribeTags' 'AWS Load Balancer Controller' 'The controller may fail tag-based ALB discovery.'
+    New-RequiredAction 'elasticloadbalancing:DescribeTrustStores' 'AWS Load Balancer Controller' 'The controller may fail trust store discovery.'
+    New-RequiredAction 'elasticloadbalancing:DescribeListenerAttributes' 'AWS Load Balancer Controller' 'The controller may fail listener attribute discovery.'
+    New-RequiredAction 'elasticloadbalancing:DescribeCapacityReservation' 'AWS Load Balancer Controller' 'The controller may fail ALB capacity reservation discovery.'
+    New-RequiredAction 'elasticloadbalancing:CreateLoadBalancer' 'AWS Load Balancer Controller' 'Ingress may fail to provision an ALB.'
+    New-RequiredAction 'elasticloadbalancing:CreateTargetGroup' 'AWS Load Balancer Controller' 'Ingress may fail to create target groups.'
+    New-RequiredAction 'elasticloadbalancing:CreateListener' 'AWS Load Balancer Controller' 'Ingress may fail to create ALB listeners.'
+    New-RequiredAction 'elasticloadbalancing:DeleteListener' 'AWS Load Balancer Controller' 'Listener cleanup may fail.'
+    New-RequiredAction 'elasticloadbalancing:CreateRule' 'AWS Load Balancer Controller' 'Ingress may fail to create route listener rules.'
+    New-RequiredAction 'elasticloadbalancing:DeleteRule' 'AWS Load Balancer Controller' 'Listener rule cleanup may fail.'
+    New-RequiredAction 'elasticloadbalancing:AddTags' 'AWS Load Balancer Controller' 'The controller may fail to tag ALB resources.'
+    New-RequiredAction 'elasticloadbalancing:RemoveTags' 'AWS Load Balancer Controller' 'The controller may fail to reconcile ALB tags.'
+    New-RequiredAction 'elasticloadbalancing:ModifyLoadBalancerAttributes' 'AWS Load Balancer Controller' 'The controller may fail to apply ALB attributes.'
+    New-RequiredAction 'elasticloadbalancing:SetIpAddressType' 'AWS Load Balancer Controller' 'The controller may fail to reconcile ALB address type.'
+    New-RequiredAction 'elasticloadbalancing:SetSecurityGroups' 'AWS Load Balancer Controller' 'The controller may fail to attach security groups to the ALB.'
+    New-RequiredAction 'elasticloadbalancing:SetSubnets' 'AWS Load Balancer Controller' 'The controller may fail to attach subnets to the ALB.'
+    New-RequiredAction 'elasticloadbalancing:DeleteLoadBalancer' 'AWS Load Balancer Controller' 'ALB cleanup may fail.'
+    New-RequiredAction 'elasticloadbalancing:ModifyTargetGroup' 'AWS Load Balancer Controller' 'Target group reconciliation may fail.'
+    New-RequiredAction 'elasticloadbalancing:ModifyTargetGroupAttributes' 'AWS Load Balancer Controller' 'Target group attribute reconciliation may fail.'
+    New-RequiredAction 'elasticloadbalancing:DeleteTargetGroup' 'AWS Load Balancer Controller' 'Target group cleanup may fail.'
+    New-RequiredAction 'elasticloadbalancing:ModifyListenerAttributes' 'AWS Load Balancer Controller' 'Listener attribute reconciliation may fail.'
+    New-RequiredAction 'elasticloadbalancing:ModifyCapacityReservation' 'AWS Load Balancer Controller' 'ALB capacity reservation reconciliation may fail.'
+    New-RequiredAction 'elasticloadbalancing:ModifyIpPools' 'AWS Load Balancer Controller' 'ALB IP pool reconciliation may fail.'
+    New-RequiredAction 'elasticloadbalancing:RegisterTargets' 'AWS Load Balancer Controller' 'Pods may not be registered in target groups.'
+    New-RequiredAction 'elasticloadbalancing:DeregisterTargets' 'AWS Load Balancer Controller' 'Pods may not be removed from target groups.'
+    New-RequiredAction 'elasticloadbalancing:ModifyListener' 'AWS Load Balancer Controller' 'Listener reconciliation may fail.'
+    New-RequiredAction 'elasticloadbalancing:ModifyRule' 'AWS Load Balancer Controller' 'Listener rule reconciliation may fail.'
+    New-RequiredAction 'elasticloadbalancing:SetRulePriorities' 'AWS Load Balancer Controller' 'Listener rule priority reconciliation may fail.'
+)
+
+$workloadRequiredActions = @(
+    New-RequiredAction 'secretsmanager:DescribeSecret' 'Application workloads and database bootstrap' 'Pods may fail to inspect required Secrets Manager secrets.'
+    New-RequiredAction 'secretsmanager:GetSecretValue' 'Application workloads and database bootstrap' 'Pods may fail to read database and runtime secrets.'
+    New-RequiredAction 'sqs:ReceiveMessage' 'Estoque and Ordens workloads' 'Workers may fail to consume queue messages.'
+    New-RequiredAction 'sqs:DeleteMessage' 'Estoque and Ordens workloads' 'Workers may reprocess messages because deletes fail.'
+    New-RequiredAction 'sqs:ChangeMessageVisibility' 'Estoque and Ordens workloads' 'Workers may fail to extend message processing visibility.'
+    New-RequiredAction 'sqs:GetQueueAttributes' 'Estoque and Ordens workloads' 'Workers may fail queue validation or SDK setup.'
+    New-RequiredAction 'sqs:GetQueueUrl' 'Estoque and Ordens workloads' 'Workers may fail queue URL discovery.'
+    New-RequiredAction 'sqs:SendMessage' 'Estoque and Ordens workloads' 'Services may fail to publish commands or events.'
+    New-RequiredAction 'ssm:GetParameter' 'Application workloads and bootstrap' 'Pods may fail to read platform parameters.'
+    New-RequiredAction 'ssm:GetParameters' 'Application workloads and bootstrap' 'Pods may fail to read grouped platform parameters.'
+    New-RequiredAction 'kms:Decrypt' 'Application workloads and bootstrap' 'Pods may fail to read customer-managed encrypted secrets or parameters.' 'Warning'
+)
+
+$nodeRoleRequiredActions = @($nodeBaseRequiredActions + $loadBalancerControllerRequiredActions + $workloadRequiredActions)
+
+$nodeRoleRequiredActions = @($nodeRoleRequiredActions | Where-Object {
+    $consumer = [string](Get-PropertyValue $_ 'Consumer')
+    $include = $true
+
+    if ($externalRoles.ContainsKey('load_balancer_controller_role_arn') -and $consumer -eq 'AWS Load Balancer Controller') {
+        $include = $false
+    } elseif ($externalRoles.ContainsKey('workload_role_arn') -and $consumer -notin @('EKS nodes', 'AWS Load Balancer Controller')) {
+        $include = $false
+    }
+
+    $include
+})
+
+if ($externalRoles.ContainsKey('eks_cluster_role_arn') -xor $externalRoles.ContainsKey('eks_node_group_role_arn')) {
+    Add-Failure "PLATFORM_IAM_ROLES_JSON must configure eks_cluster_role_arn and eks_node_group_role_arn together when external cluster or node roles are used."
+}
+
+$usesNodeRoleForPlatformPods = -not $externalRoles.ContainsKey('load_balancer_controller_role_arn') -or -not $externalRoles.ContainsKey('workload_role_arn')
+if ($usesNodeRoleForPlatformPods -and -not $externalRoles.ContainsKey('eks_node_group_role_arn')) {
+    Add-Failure "Platform pods are configured to use node role credentials, but eks_node_group_role_arn is not configured. Provide an external node role with the required permissions."
+}
+
 $components = @(
     @{
         Field                  = 'eks_cluster_role_arn'
@@ -587,8 +833,8 @@ $components = @(
         TrustService           = 'ec2.amazonaws.com'
         PassService            = 'ec2.amazonaws.com'
         RequireTagSession      = $false
-        AttachedPolicyNames    = @('AmazonEKSWorkerNodePolicy', 'AmazonEKS_CNI_Policy', 'AmazonEC2ContainerRegistryReadOnly')
-        RequiredPolicyActions  = @()
+        AttachedPolicyNames    = @()
+        RequiredPolicyActions  = $nodeRoleRequiredActions
     },
     @{
         Field                  = 'load_balancer_controller_role_arn'
@@ -597,18 +843,7 @@ $components = @(
         PassService            = 'pods.eks.amazonaws.com'
         RequireTagSession      = $true
         AttachedPolicyNames    = @()
-        RequiredPolicyActions  = @(
-            'ec2:DescribeVpcs',
-            'ec2:DescribeSubnets',
-            'ec2:DescribeSecurityGroups',
-            'ec2:CreateSecurityGroup',
-            'ec2:AuthorizeSecurityGroupIngress',
-            'elasticloadbalancing:DescribeLoadBalancers',
-            'elasticloadbalancing:CreateLoadBalancer',
-            'elasticloadbalancing:CreateTargetGroup',
-            'elasticloadbalancing:CreateListener',
-            'elasticloadbalancing:RegisterTargets'
-        )
+        RequiredPolicyActions  = $loadBalancerControllerRequiredActions
     },
     @{
         Field                  = 'workload_role_arn'
@@ -617,18 +852,11 @@ $components = @(
         PassService            = 'pods.eks.amazonaws.com'
         RequireTagSession      = $true
         AttachedPolicyNames    = @()
-        RequiredPolicyActions  = @(
-            'secretsmanager:DescribeSecret',
-            'secretsmanager:GetSecretValue',
-            'sqs:ReceiveMessage',
-            'sqs:DeleteMessage',
-            'sqs:ChangeMessageVisibility',
-            'sqs:GetQueueAttributes',
-            'sqs:GetQueueUrl',
-            'sqs:SendMessage'
-        )
+        RequiredPolicyActions  = $workloadRequiredActions
     }
 )
+
+$rolePartsByField = @{}
 
 foreach ($component in $components) {
     $field = [string]$component.Field
@@ -642,6 +870,8 @@ foreach ($component in $components) {
         continue
     }
 
+    $rolePartsByField[$field] = $parts
+
     if ($parts.AccountId -ne $CallerAccountId) {
         Add-Failure "Component '$($component.Component)' uses field '$field', but the role account must match the deploy account."
         continue
@@ -651,7 +881,24 @@ foreach ($component in $components) {
     Test-TrustPolicy -Role $role -ExpectedService $component.TrustService -RequireTagSession $component.RequireTagSession -Field $field -Component $component.Component
     Assert-AttachedPolicyNames -RoleName $parts.RoleName -ExpectedPolicyNames $component.AttachedPolicyNames -Field $field -Component $component.Component
     Test-RolePolicyActions -RoleName $parts.RoleName -RequiredActions $component.RequiredPolicyActions -Field $field -Component $component.Component
+    Test-RoleEffectiveActions -RoleArn $roleArn -RoleName $parts.RoleName -RequiredActions $component.RequiredPolicyActions -Field $field -Component $component.Component
     Test-CallerPassRole -CallerPolicySourceArn $callerPolicySourceArn -RoleArn $roleArn -PassedToService $component.PassService -Field $field -Component $component.Component
+}
+
+if (-not $externalRoles.ContainsKey('load_balancer_controller_role_arn') -and $rolePartsByField.ContainsKey('eks_node_group_role_arn')) {
+    $serviceLinkedRole = Invoke-NativeCommand -Command 'aws' -Arguments @('iam', 'get-role', '--role-name', 'AWSServiceRoleForElasticLoadBalancing', '--output', 'json')
+    if ($serviceLinkedRole.ExitCode -eq 0) {
+        Write-Host 'Elastic Load Balancing service-linked role exists.'
+    } elseif ($serviceLinkedRole.Text -match 'NoSuchEntity') {
+        Add-WarningMessage "Elastic Load Balancing service-linked role was not found. Entrypoint Deploy may need iam:CreateServiceLinkedRole on the node role when the first ALB is provisioned."
+        Test-RolePolicyActions `
+            -RoleName $rolePartsByField['eks_node_group_role_arn'].RoleName `
+            -RequiredActions @(New-RequiredAction 'iam:CreateServiceLinkedRole' 'AWS Load Balancer Controller' 'If the Elastic Load Balancing service-linked role is absent, ALB provisioning may fail until that role exists.' 'Warning') `
+            -Field 'eks_node_group_role_arn' `
+            -Component 'Elastic Load Balancing service-linked role'
+    } else {
+        Add-WarningMessage "Could not confirm Elastic Load Balancing service-linked role existence: $(ConvertTo-SafeLogText $serviceLinkedRole.Text)"
+    }
 }
 
 $managedRolePassTargets = @(
@@ -666,18 +913,6 @@ $managedRolePassTargets = @(
         Field           = 'eks_node_group_role_arn'
         Component       = 'EKS node group'
         PassedToService = 'ec2.amazonaws.com'
-    },
-    @{
-        AddressPrefix   = 'aws_iam_role.load_balancer_controller'
-        Field           = 'load_balancer_controller_role_arn'
-        Component       = 'AWS Load Balancer Controller'
-        PassedToService = 'pods.eks.amazonaws.com'
-    },
-    @{
-        AddressPrefix   = 'aws_iam_role.workload'
-        Field           = 'workload_role_arn'
-        Component       = 'application workloads'
-        PassedToService = 'pods.eks.amazonaws.com'
     }
 )
 
@@ -721,6 +956,48 @@ if ($passRoleCreates.Count -gt 0) {
     Add-RequiredAction $planRequiredActions 'iam:PassRole'
 }
 
+$unexpectedIdentityCreates = @($creates | Where-Object {
+    $address = [string]$_.address
+    $type = [string]$_.type
+    $include = $false
+
+    if ($type -eq 'aws_iam_openid_connect_provider') {
+        $include = $true
+    }
+
+    if ($type -in @('aws_iam_role', 'aws_iam_policy', 'aws_iam_role_policy', 'aws_iam_role_policy_attachment') -and
+        ($address -like '*load_balancer_controller*' -or $address -like '*workload*')) {
+        $include = $true
+    }
+
+    if ($type -eq 'aws_eks_pod_identity_association' -and
+        $address -like '*load_balancer_controller*' -and
+        -not $externalRoles.ContainsKey('load_balancer_controller_role_arn')) {
+        $include = $true
+    }
+
+    if ($type -eq 'aws_eks_pod_identity_association' -and
+        $address -like '*workload*' -and
+        -not $externalRoles.ContainsKey('workload_role_arn')) {
+        $include = $true
+    }
+
+    if ($type -eq 'aws_eks_addon') {
+        $after = Get-PropertyValue $_.change 'after'
+        $addonName = [string](Get-PropertyValue $after 'addon_name')
+        if ($addonName -eq 'eks-pod-identity-agent' -and -not $externalRoles.ContainsKey('load_balancer_controller_role_arn') -and -not $externalRoles.ContainsKey('workload_role_arn')) {
+            $include = $true
+        }
+    }
+
+    $include
+})
+
+if ($unexpectedIdentityCreates.Count -gt 0) {
+    $details = (@($unexpectedIdentityCreates | ForEach-Object { "$($_.address) ($($_.type))" }) | Sort-Object) -join '; '
+    Add-Failure "Terraform plan creates identity resources that should be avoided for node role credential mode: $details"
+}
+
 Test-CallerRequiredActions -CallerPolicySourceArn $callerPolicySourceArn -RequiredActions @($iamManagementActions) -IamCreates $iamCreates
 
 $protectedTypes = @(
@@ -737,12 +1014,15 @@ $protectedTypes = @(
     'aws_iam_role_policy',
     'aws_iam_role_policy_attachment',
     'aws_iam_openid_connect_provider',
+    'aws_launch_template',
     'aws_ssm_parameter',
     'aws_secretsmanager_secret'
 )
 
 $dangerousChanges = @($resourceChanges | Where-Object {
-    $protectedTypes -contains [string]$_.type -and @($_.change.actions) -contains 'delete'
+    $protectedTypes -contains [string]$_.type -and
+    @($_.change.actions) -contains 'delete' -and
+    [string]$_.address -ne 'aws_eks_addon.managed["eks-pod-identity-agent"]'
 })
 
 if ($dangerousChanges.Count -gt 0) {

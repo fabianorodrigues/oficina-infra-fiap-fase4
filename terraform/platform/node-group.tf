@@ -38,6 +38,43 @@ resource "aws_iam_role_policy_attachment" "node_group_ecr" {
   policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
 
+resource "aws_launch_template" "node_group" {
+  name_prefix            = "${local.cluster_name}-${local.official.nodeGroup.name}-"
+  update_default_version = true
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+
+    ebs {
+      delete_on_termination = true
+      encrypted             = true
+      volume_size           = local.official.nodeGroup.diskSize
+      volume_type           = "gp3"
+    }
+  }
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_put_response_hop_limit = 2
+    http_tokens                 = "required"
+    instance_metadata_tags      = "disabled"
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+    tags          = local.common_tags
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags          = local.common_tags
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 resource "aws_eks_node_group" "this" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = local.official.nodeGroup.name
@@ -45,8 +82,12 @@ resource "aws_eks_node_group" "this" {
   subnet_ids      = [data.aws_ssm_parameter.private_subnet_1.value, data.aws_ssm_parameter.private_subnet_2.value]
 
   capacity_type  = local.official.nodeGroup.capacityType
-  disk_size      = local.official.nodeGroup.diskSize
   instance_types = local.official.nodeGroup.instanceTypes
+
+  launch_template {
+    id      = aws_launch_template.node_group.id
+    version = aws_launch_template.node_group.latest_version
+  }
 
   scaling_config {
     desired_size = local.official.nodeGroup.desiredSize

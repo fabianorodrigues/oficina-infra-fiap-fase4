@@ -1,14 +1,16 @@
 aws_region = "us-east-1"
 
-# Keep this aligned with terraform/platform/iam.tf.
 load_balancer_controller_chart_version = "3.4.1"
 secrets_store_csi_driver_chart_version = ""
 ascp_chart_version                     = ""
 opentelemetry_collector_chart_version  = ""
 newrelic_chart_version                 = ""
 
-# Optional: set only when the target account provides IAM roles outside Terraform.
-# Omit any field that Terraform should create and manage.
+# Set when the target account provides IAM roles outside Terraform.
+# In node role credential mode, configure a cluster role and a node role with
+# enough permissions for nodes, the controller, workloads, migrators, and bootstrap.
+# Controller/workload roles are optional future Pod Identity inputs; when omitted,
+# those pods use the node role through the default AWS credential chain.
 # platform_iam_roles = {
 #   eks_cluster_role_arn              = "arn:aws:iam::123456789012:role/example-eks-cluster"
 #   eks_node_group_role_arn           = "arn:aws:iam::123456789012:role/example-eks-node-group"

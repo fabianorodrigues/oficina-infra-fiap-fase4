@@ -5,7 +5,6 @@ locals {
   project_name     = local.official.project.name
   cluster_name     = local.official.cluster.name
   namespace        = local.official.cluster.namespace
-  workload_mode    = local.official.workloadIdentity.mode
   enable_new_relic = local.official.observability.enableNewRelic
 
   platform_iam_roles = {
@@ -19,6 +18,7 @@ locals {
   use_external_node_group_role               = local.platform_iam_roles.eks_node_group_role_arn != ""
   use_external_load_balancer_controller_role = local.platform_iam_roles.load_balancer_controller_role_arn != ""
   use_external_workload_role                 = local.platform_iam_roles.workload_role_arn != ""
+  use_pod_identity_agent                     = local.use_external_load_balancer_controller_role || local.use_external_workload_role
 
   ecr_repositories = {
     cadastro = local.official.ecr.cadastro
@@ -95,12 +95,14 @@ locals {
     }
   }
 
-  addon_names = toset([
-    "vpc-cni",
-    "coredns",
-    "kube-proxy",
-    "eks-pod-identity-agent"
-  ])
+  addon_names = toset(concat(
+    [
+      "vpc-cni",
+      "coredns",
+      "kube-proxy"
+    ],
+    local.use_pod_identity_agent ? ["eks-pod-identity-agent"] : []
+  ))
 
   common_tags = {
     Project    = local.project_name
@@ -120,19 +122,8 @@ locals {
     : aws_iam_role.node_group[0].arn
   )
 
-  load_balancer_controller_role_arn = (
-    local.use_external_load_balancer_controller_role
-    ? local.platform_iam_roles.load_balancer_controller_role_arn
-    : aws_iam_role.load_balancer_controller[0].arn
-  )
-
-  workload_role_arn_by_service_account = merge(
-    {
-      for key in keys(local.workload_service_accounts) : key => local.platform_iam_roles.workload_role_arn
-      if local.use_external_workload_role
-    },
-    {
-      for key, role in aws_iam_role.workload : key => role.arn
-    }
-  )
+  workload_role_arn_by_service_account = {
+    for key in keys(local.workload_service_accounts) : key => local.platform_iam_roles.workload_role_arn
+    if local.use_external_workload_role
+  }
 }
