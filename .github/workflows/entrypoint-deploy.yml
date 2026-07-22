@@ -92,7 +92,27 @@ jobs:
           test "$proto" = "HTTP"
           for target in cadastro estoque ordens; do
             tg=$(aws ssm get-parameter --name "/oficina/infra/ecs/${target}/target-group-arn" --region "$AWS_REGION" --query Parameter.Value --output text)
-            aws elbv2 describe-target-health --target-group-arn "$tg" --region "$AWS_REGION" >/dev/null
+            deadline=$((SECONDS + 600))
+            while true; do
+              health=$(aws elbv2 describe-target-health --target-group-arn "$tg" --region "$AWS_REGION" --output json)
+              target_count=$(jq '.TargetHealthDescriptions | length' <<< "$health")
+              healthy_count=$(jq '[.TargetHealthDescriptions[] | select(.TargetHealth.State == "healthy")] | length' <<< "$health")
+              if [ "$target_count" -gt 0 ] && [ "$healthy_count" -eq "$target_count" ]; then
+                echo "Target group for ${target} is healthy (${healthy_count}/${target_count})."
+                break
+              fi
+              if [ "$SECONDS" -ge "$deadline" ]; then
+                if [ "$target_count" -eq 0 ]; then
+                  echo "Target group for ${target} has no registered ECS targets. Deploy the ${target} service before Entrypoint Deploy." >&2
+                else
+                  echo "Target group for ${target} is not fully healthy:" >&2
+                  jq -r '.TargetHealthDescriptions[] | "  target=\(.Target.Id):\(.Target.Port) state=\(.TargetHealth.State) reason=\(.TargetHealth.Reason // "-") description=\(.TargetHealth.Description // "-")"' <<< "$health" >&2
+                fi
+                exit 1
+              fi
+              echo "Waiting for ${target} target group health (${healthy_count}/${target_count} healthy)..."
+              sleep 20
+            done
           done
           {
             echo "VPC_ID=$vpc"

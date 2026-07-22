@@ -1,7 +1,9 @@
 locals {
-  # Lambda invoke URI for the authorizer alias (live). Built from the alias ARN
-  # published by the Auth stack; never targets $LATEST.
-  authorizer_invoke_uri = "arn:${data.aws_partition.current.partition}:apigateway:${data.aws_region.current.name}:lambda:path/2015-03-31/functions/${data.aws_ssm_parameter.authorizer_alias_arn.value}/invocations"
+  # Lambda invoke URIs for the live aliases published by the Auth stack; these
+  # are the API Gateway Lambda proxy/authorizer form, never bare Lambda ARNs.
+  lambda_invoke_uri_prefix = "arn:${data.aws_partition.current.partition}:apigateway:${data.aws_region.current.name}:lambda:path/2015-03-31/functions"
+  auth_cpf_invoke_uri      = "${local.lambda_invoke_uri_prefix}/${data.aws_ssm_parameter.auth_cpf_alias_arn.value}/invocations"
+  authorizer_invoke_uri    = "${local.lambda_invoke_uri_prefix}/${data.aws_ssm_parameter.authorizer_alias_arn.value}/invocations"
 }
 
 # REQUEST authorizer, payload 2.0, simple responses, no cache (TTL 0). Cache is
