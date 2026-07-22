@@ -94,9 +94,11 @@ if ($albIntegrations.Count -ge 1) { Add-Ok "$($albIntegrations.Count) private in
 $lambdaIntegrations = @($integrations.Items | Where-Object { $_.IntegrationType -eq 'AWS_PROXY' })
 foreach ($i in $lambdaIntegrations) {
     if ($i.PayloadFormatVersion -ne '2.0') { Add-Failure "Auth integration payload is '$($i.PayloadFormatVersion)', expected 2.0." }
-    if ($i.IntegrationUri -notmatch ':live$') { Add-Failure 'Auth integration does not use the live alias ARN.' }
+    if ($i.IntegrationUri -notmatch '^arn:[^:]+:apigateway:[^:]+:lambda:path/2015-03-31/functions/arn:[^:]+:lambda:[^:]+:[0-9]+:function:[^/]+:live/invocations$') {
+        Add-Failure 'Auth integration does not use the live alias invoke URI.'
+    }
 }
-if ($lambdaIntegrations.Count -ge 1) { Add-Ok 'Auth Lambda integration uses payload 2.0 and the live alias' }
+if ($lambdaIntegrations.Count -ge 1) { Add-Ok 'Auth Lambda integration uses payload 2.0 and the live alias invoke URI' }
 
 # 6. Authorizer: REQUEST, payload 2.0, simple responses, TTL 0, live alias.
 $authorizers = Invoke-Aws @('apigatewayv2', 'get-authorizers', '--api-id', $apiId)

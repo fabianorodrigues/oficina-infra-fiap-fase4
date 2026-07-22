@@ -47,13 +47,13 @@ resource "aws_apigatewayv2_integration" "health" {
   )
 }
 
-# Direct Lambda proxy integration for the login route. Uses the live alias, not
-# $LATEST, and never routes login through the ALB.
+# Direct Lambda proxy integration for the login route. Uses the live alias
+# invoke URI, not $LATEST, and never routes login through the ALB.
 resource "aws_apigatewayv2_integration" "auth_lambda" {
   api_id                 = aws_apigatewayv2_api.this.id
   integration_type       = "AWS_PROXY"
   integration_method     = "POST"
-  integration_uri        = data.aws_ssm_parameter.auth_cpf_alias_arn.value
+  integration_uri        = local.auth_cpf_invoke_uri
   payload_format_version = local.entrypoint.integration.lambdaPayloadFormatVersion
   timeout_milliseconds   = local.integration_timeout
 }
