@@ -7,6 +7,8 @@ resource "aws_security_group" "alb" {
 }
 
 resource "aws_security_group" "ecs_tasks" {
+  #checkov:skip=CKV2_AWS_5:This shared task security group is intentionally published through SSM and attached by service deploys in separate repositories.
+
   name        = "${local.project_name}-ecs-tasks"
   description = "Shared security group for Oficina ECS Fargate tasks."
   vpc_id      = data.aws_ssm_parameter.vpc_id.value
@@ -55,4 +57,3 @@ resource "aws_vpc_security_group_ingress_rule" "rds_from_tasks" {
 
   tags = merge(local.common_tags, { Name = "${local.project_name}-rds-ingress-ecs" })
 }
-

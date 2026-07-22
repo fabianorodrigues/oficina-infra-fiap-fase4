@@ -1,5 +1,7 @@
 resource "aws_lb" "internal" {
+  #checkov:skip=CKV_AWS_91:Access logs are intentionally omitted for this low-cost internal ALB; CloudWatch platform metrics remain validated by the observability workflow.
   #checkov:skip=CKV_AWS_150:Deletion protection is intentionally not enabled for the low-cost internal entrypoint; protected resources are guarded by plan checks.
+  #checkov:skip=CKV2_AWS_20:This ALB is private behind API Gateway VPC Link, so TLS terminates at the public API edge and internal forwarding stays HTTP.
 
   name               = local.official.loadBalancer.name
   internal           = true
@@ -14,6 +16,8 @@ resource "aws_lb" "internal" {
 }
 
 resource "aws_lb_target_group" "service" {
+  #checkov:skip=CKV_AWS_378:Targets receive private VPC traffic from the internal ALB; public TLS is terminated at API Gateway.
+
   for_each = local.services
 
   name                 = each.value.target_group_name
@@ -38,6 +42,9 @@ resource "aws_lb_target_group" "service" {
 }
 
 resource "aws_lb_listener" "http" {
+  #checkov:skip=CKV_AWS_2:This listener is internal only; public HTTPS is handled by API Gateway before traffic enters the VPC Link.
+  #checkov:skip=CKV_AWS_103:TLS policies are not applicable to the intentionally HTTP-only internal listener.
+
   load_balancer_arn = aws_lb.internal.arn
   port              = local.official.loadBalancer.listenerPort
   protocol          = "HTTP"
