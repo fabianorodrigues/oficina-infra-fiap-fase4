@@ -47,6 +47,8 @@ $apis = Invoke-Aws @('apigatewayv2', 'get-apis')
 $api = @($apis.Items | Where-Object { $_.Name -eq $ApiName })[0]
 if ($null -eq $api) { throw "API '$ApiName' not found." }
 $apiId = $api.ApiId
+$partition = ([string]$identity.Arn -split ':')[1]
+$apiExecutionArn = "arn:${partition}:execute-api:${Region}:$($identity.Account):${apiId}"
 if ($api.ProtocolType -ne 'HTTP') { Add-Failure "API protocol is '$($api.ProtocolType)', expected HTTP." } else { Add-Ok 'API protocol HTTP' }
 if ($api.DisableExecuteApiEndpoint -eq $true) { Add-Failure 'execute-api endpoint is disabled.' } else { Add-Ok 'execute-api endpoint enabled' }
 
@@ -137,7 +139,13 @@ foreach ($fnParam in @($config.auth.authCpfFunctionNameParameter, $config.auth.a
     $alias = Invoke-Aws @('lambda', 'get-alias', '--function-name', $fn, '--name', $config.auth.alias)
     if ($null -eq $alias) { Add-Failure "Lambda $fn has no '$($config.auth.alias)' alias." } else { Add-Ok "Lambda $fn alias $($config.auth.alias) present" }
     $policy = Invoke-Aws @('lambda', 'get-policy', '--function-name', $fn, '--qualifier', $config.auth.alias)
-    if ($null -eq $policy -or $policy.Policy -notmatch 'apigateway') { Add-Failure "Lambda $fn ($($config.auth.alias)) has no API Gateway invoke permission." } else { Add-Ok "Lambda $fn invoke permission present" }
+    if ($null -eq $policy -or $policy.Policy -notmatch 'apigateway') {
+        Add-Failure "Lambda $fn ($($config.auth.alias)) has no API Gateway invoke permission."
+    } elseif (-not ([string]$policy.Policy).Contains("${apiExecutionArn}/*")) {
+        Add-Failure "Lambda $fn ($($config.auth.alias)) is missing the API-scoped invoke permission ${apiExecutionArn}/*."
+    } else {
+        Add-Ok "Lambda $fn invoke permission present"
+    }
 }
 
 # 9. Access log group exists.
