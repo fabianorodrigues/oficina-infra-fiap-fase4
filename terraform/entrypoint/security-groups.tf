@@ -27,8 +27,6 @@ resource "aws_vpc_security_group_egress_rule" "vpc_link_to_alb" {
   }
 }
 
-# Ingress rule added (standalone, no ownership of the controller-managed SG) to
-# the ALB frontend security group: allow only the VPC Link security group on 80.
 resource "aws_vpc_security_group_ingress_rule" "alb_from_vpc_link" {
   #checkov:skip=CKV_AWS_260:Port 80 is allowed only from the API Gateway VPC Link security group via referenced_security_group_id, not from a public CIDR.
 

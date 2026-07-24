@@ -63,7 +63,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $text = (Get-ChildItem -Path config,terraform,scripts -Recurse -File | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName }) -join "`n"
-          foreach ($pattern in @('kubectl', 'helm', 'aws\s+eks', 'deploy/k8s', 'secretproviderclass', 'secrets-store\.csi')) {
+          foreach ($pattern in @('kubectl', 'helm', 'aws\s+eks', 'deploy/k8s', 'secretproviderclass', 'secrets-store\.csi', 'elbv2\.k8s\.aws', 'load\s+balancer\s+controller')) {
             if ($text -match $pattern) { throw "Legacy platform pattern found: $pattern" }
           }
       - name: Publish summary
