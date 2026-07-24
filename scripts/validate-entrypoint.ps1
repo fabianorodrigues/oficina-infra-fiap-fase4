@@ -26,8 +26,16 @@ function Invoke-Aws {
     param([Parameter(Mandatory = $true)][string[]]$AwsArgs)
     $common = @('--region', $Region, '--output', 'json')
     if (-not [string]::IsNullOrWhiteSpace($AwsProfile)) { $common += @('--profile', $AwsProfile) }
-    $out = & aws @AwsArgs @common 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "aws $($AwsArgs -join ' ') failed: $out" }
+    try {
+        $out = & aws @AwsArgs @common 2>$errPath
+        if ($LASTEXITCODE -ne 0) {
+            $err = (Get-Content -LiteralPath $errPath -Raw)
+            throw "aws $($AwsArgs -join ' ') failed: $err"
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $errPath -Force -ErrorAction SilentlyContinue
+    }
     if ([string]::IsNullOrWhiteSpace($out)) { return $null }
     return ($out | ConvertFrom-Json)
 }

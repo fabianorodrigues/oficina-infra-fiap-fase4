@@ -12,10 +12,10 @@ variable "aws_region" {
 variable "alb_frontend_security_group_id" {
   description = <<-EOT
     Optional explicit ALB frontend security group ID. Leave empty to auto-detect
-    from the internal ALB. Auto-detection excludes the shared backend security
-    group (tagged elbv2.k8s.aws/resource=backend-sg) created by the AWS Load
-    Balancer Controller and requires exactly one remaining frontend security
-    group; otherwise the plan fails and this value must be provided explicitly.
+    from the internal ALB. The platform stack manages exactly one security group
+    for the internal ALB, so auto-detection reads the ALB's security groups and
+    requires exactly one. If the data source ever returns more than one group the
+    plan fails and this value must be provided explicitly.
   EOT
   type        = string
   default     = ""

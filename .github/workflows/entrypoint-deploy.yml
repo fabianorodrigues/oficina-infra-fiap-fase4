@@ -72,6 +72,9 @@ jobs:
             if ($LASTEXITCODE -ne 0) { $bucket = $env:TF_STATE_BUCKET_FALLBACK }
           }
           aws s3api head-bucket --bucket $bucket
+          if ($LASTEXITCODE -ne 0) {
+            throw "Terraform state bucket '$bucket' not found or not accessible. Run the Database Infrastructure Deploy (step 1) first."
+          }
           "TF_STATE_BUCKET=$bucket" | Add-Content -Path $env:GITHUB_ENV
           "AWS_ACCOUNT_ID=$($identity.Account)" | Add-Content -Path $env:GITHUB_ENV
 
