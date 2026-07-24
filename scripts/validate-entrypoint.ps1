@@ -26,18 +26,20 @@ function Invoke-Aws {
     param([Parameter(Mandatory = $true)][string[]]$AwsArgs)
     $common = @('--region', $Region, '--output', 'json')
     if (-not [string]::IsNullOrWhiteSpace($AwsProfile)) { $common += @('--profile', $AwsProfile) }
+    $errPath = Join-Path ([System.IO.Path]::GetTempPath()) ("aws-stderr-{0}.log" -f [guid]::NewGuid().ToString('N'))
     try {
-        $out = & aws @AwsArgs @common 2>$errPath
+        $out = & { $ErrorActionPreference = 'Continue'; & aws @AwsArgs @common 2>$errPath }
         if ($LASTEXITCODE -ne 0) {
-            $err = (Get-Content -LiteralPath $errPath -Raw)
+            $err = if (Test-Path -LiteralPath $errPath) { (Get-Content -LiteralPath $errPath -Raw) } else { '' }
             throw "aws $($AwsArgs -join ' ') failed: $err"
         }
     }
     finally {
         Remove-Item -LiteralPath $errPath -Force -ErrorAction SilentlyContinue
     }
-    if ([string]::IsNullOrWhiteSpace($out)) { return $null }
-    return ($out | ConvertFrom-Json)
+    $json = ($out | Out-String).Trim()
+    if ([string]::IsNullOrWhiteSpace($json)) { return $null }
+    return ($json | ConvertFrom-Json)
 }
 
 function Get-Ssm([string]$Name) {
