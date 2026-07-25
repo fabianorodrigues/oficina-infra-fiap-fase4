@@ -94,7 +94,7 @@ jobs:
           proto=$(aws elbv2 describe-listeners --listener-arns "$listener_arn" --region "$AWS_REGION" --query 'Listeners[0].Protocol' --output text)
           test "$proto" = "HTTP"
           for target in cadastro estoque ordens; do
-            tg=$(aws ssm get-parameter --name "/oficina/infra/ecs/${target}/target-group-arn" --region "$AWS_REGION" --query Parameter.Value --output text)
+            tg=$(aws ssm get-parameter --name "/oficina/infra/services/${target}/target-group-arn" --region "$AWS_REGION" --query Parameter.Value --output text)
             deadline=$((SECONDS + 600))
             while true; do
               health=$(aws elbv2 describe-target-health --target-group-arn "$tg" --region "$AWS_REGION" --output json)
@@ -106,7 +106,7 @@ jobs:
               fi
               if [ "$SECONDS" -ge "$deadline" ]; then
                 if [ "$target_count" -eq 0 ]; then
-                  echo "Target group for ${target} has no registered ECS targets. Deploy the ${target} service before Entrypoint Deploy." >&2
+                  echo "Target group for ${target} has no registered targets. Deploy the ${target} service before Entrypoint Deploy." >&2
                 else
                   echo "Target group for ${target} is not fully healthy:" >&2
                   jq -r '.TargetHealthDescriptions[] | "  target=\(.Target.Id):\(.Target.Port) state=\(.TargetHealth.State) reason=\(.TargetHealth.Reason // "-") description=\(.TargetHealth.Description // "-")"' <<< "$health" >&2

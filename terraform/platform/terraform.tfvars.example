@@ -1,3 +1,12 @@
 aws_region = "us-east-1"
 
-log_retention_days = 14
+# Instance profile pre-existente da EC2. As roles IAM sao externas e fornecidas
+# por configuracao; esta stack nunca cria nem altera recursos IAM.
+instance_profile_name = "REPLACE_WITH_EXISTING_INSTANCE_PROFILE_NAME"
+
+k3s_instance_type    = "t3.medium"
+k3s_root_volume_size = 30
+
+# k3s_version nao tem default e nao aparece aqui por decisao: a fonte unica da
+# versao e config/official.yml, exportada pelo workflow como TF_VAR_k3s_version.
+# Repetir o valor neste arquivo criaria uma segunda fonte, livre para divergir.

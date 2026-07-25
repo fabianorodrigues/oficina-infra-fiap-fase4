@@ -4,8 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: Type APPLY to reconcile the ECS platform from main.
+        description: Type APPLY to reconcile the shared platform from main.
         required: true
+        type: string
+      allow_replace:
+        description: >-
+          Comma-separated list of exact Terraform addresses released for delete or replace
+          (for example aws_lb_target_group.service["cadastro"]). Leave empty to block every
+          destructive change. Resource types are never released as a whole.
+        required: false
+        default: ""
         type: string
 
 permissions:
@@ -17,13 +25,16 @@ concurrency:
 
 jobs:
   deploy:
-    name: Deploy ECS platform
+    name: Deploy K3s platform
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       TF_STATE_KEY_PLATFORM: oficina/platform/terraform.tfstate
       TF_STATE_BUCKET_FALLBACK: ${{ vars.TF_STATE_BUCKET }}
+      TF_VAR_instance_profile_name: ${{ vars.INSTANCE_PROFILE_NAME }}
+      TF_VAR_k3s_instance_type: ${{ vars.K3S_INSTANCE_TYPE }}
+      ALLOW_REPLACE: ${{ inputs.allow_replace }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -34,6 +45,26 @@ jobs:
           if ($env:GITHUB_REF -ne 'refs/heads/main') { throw 'This workflow must run from main.' }
           if ('${{ inputs.confirmation }}' -cne 'APPLY') { throw 'Confirmation must be APPLY.' }
           if ([string]::IsNullOrWhiteSpace($env:AWS_REGION)) { throw 'Repository Variable AWS_REGION is required.' }
+          if ([string]::IsNullOrWhiteSpace($env:TF_VAR_instance_profile_name)) { throw 'Repository Variable INSTANCE_PROFILE_NAME is required.' }
+          # Uma variavel de repositorio ausente chega como string vazia e
+          # reprovaria a validacao da variavel no Terraform. Repor o padrao aqui
+          # mantem K3S_INSTANCE_TYPE opcional sem introduzir um segundo default.
+          if ([string]::IsNullOrWhiteSpace($env:TF_VAR_k3s_instance_type)) {
+            'TF_VAR_k3s_instance_type=t3.medium' | Add-Content -Path $env:GITHUB_ENV
+          }
+      - name: Resolve K3s version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(awk '/^  k3sVersion:/ {print $2; exit}' config/official.yml)
+          if [ -z "$version" ]; then
+            echo 'kubernetes.k3sVersion not found in config/official.yml.' >&2
+            exit 1
+          fi
+          echo "TF_VAR_k3s_version=$version" >> "$GITHUB_ENV"
+      - name: Validate K3s version consistency
+        shell: pwsh
+        run: ./scripts/validate-k3s-version.ps1
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v5
         with:
@@ -70,6 +101,8 @@ jobs:
           for p in /oficina/infra/vpc/id /oficina/infra/subnets/private/1 /oficina/infra/subnets/private/2 /oficina/infra/rds/security-group-id; do
             aws ssm get-parameter --name "$p" --region "$AWS_REGION" >/dev/null
           done
+          profile="$TF_VAR_instance_profile_name"
+          aws iam get-instance-profile --instance-profile-name "$profile" >/dev/null
       - name: Terraform fmt
         working-directory: terraform/platform
         run: terraform fmt -check -recursive
@@ -102,25 +135,133 @@ jobs:
         run: |
           set -euo pipefail
           terraform show -json tfplan > tfplan.json
-          protected='["aws_ecs_cluster","aws_lb","aws_lb_target_group","aws_lb_listener","aws_ecr_repository","aws_sqs_queue","aws_security_group","aws_cloudwatch_log_group","aws_ssm_parameter"]'
-          blocked=$(jq --argjson protected "$protected" '[.resource_changes[]? | select(.type as $t | $protected | index($t)) | select(.change.actions | index("delete"))] | length' tfplan.json)
-          if [ "$blocked" -gt 0 ]; then
-            echo 'Terraform plan contains delete actions for protected platform resources.' >&2
+          protected='["aws_instance","aws_lb","aws_lb_target_group","aws_lb_listener","aws_ecr_repository","aws_sqs_queue","aws_security_group","aws_ssm_parameter"]'
+
+          # A liberacao e por endereco exato e nunca por tipo de recurso:
+          # liberar "aws_lb_target_group" liberaria os tres de uma vez.
+          allow_json=$(printf '%s' "${ALLOW_REPLACE:-}" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0))')
+          echo "Enderecos liberados: $allow_json"
+
+          destructive=$(jq -r --argjson protected "$protected" '
+            [ .resource_changes[]?
+              | select(.type as $t | $protected | index($t))
+              | select((.change.actions | index("delete")) != null)
+              | .address ] | .[]' tfplan.json)
+
+          blocked=0
+          for address in $destructive; do
+            if printf '%s' "$allow_json" | jq -e --arg a "$address" 'index($a) != null' >/dev/null; then
+              echo "Liberado explicitamente: $address"
+            else
+              echo "Bloqueado: $address exige liberacao explicita em allow_replace." >&2
+              blocked=1
+            fi
+          done
+
+          if [ "$blocked" -ne 0 ]; then
+            echo 'Terraform plan contains destructive changes for protected platform resources.' >&2
             exit 1
           fi
       - name: Terraform apply
         working-directory: terraform/platform
         run: terraform apply -input=false tfplan
-      - name: Validate ECS platform
+      - name: Wait for the node and the SSM Agent
+        id: node
         run: |
           set -euo pipefail
-          cluster=$(aws ssm get-parameter --name /oficina/infra/cluster/name --region "$AWS_REGION" --query Parameter.Value --output text)
-          aws ecs describe-clusters --clusters "$cluster" --region "$AWS_REGION" --query 'clusters[0].status' --output text | grep -q ACTIVE
+          instance=$(aws ssm get-parameter --name /oficina/infra/k8s/instance-id --region "$AWS_REGION" --query Parameter.Value --output text)
+          echo "instance_id=$instance" >> "$GITHUB_OUTPUT"
+          aws ec2 wait instance-running --instance-ids "$instance" --region "$AWS_REGION"
+
+          online=0
+          for _ in $(seq 1 60); do
+            status=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=$instance" \
+              --region "$AWS_REGION" \
+              --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo None)
+            if [ "$status" = "Online" ]; then online=1; break; fi
+            sleep 10
+          done
+          if [ "$online" -ne 1 ]; then
+            echo "SSM_TIMEOUT=1" >> "$GITHUB_ENV"
+            echo 'O SSM Agent nao ficou Online dentro da janela esperada.' >&2
+            exit 1
+          fi
+      - name: Diagnose SSM timeout
+        if: failure() && env.SSM_TIMEOUT == '1'
+        run: |
+          set -euo pipefail
+          instance=$(aws ssm get-parameter --name /oficina/infra/k8s/instance-id --region "$AWS_REGION" --query Parameter.Value --output text)
+          {
+            echo '## Diagnostico: SSM sem resposta'
+            echo
+            echo '### describe-instances'
+            echo '```json'
+            aws ec2 describe-instances --instance-ids "$instance" --region "$AWS_REGION" \
+              --query 'Reservations[0].Instances[0].{State:State.Name,Subnet:SubnetId,Profile:IamInstanceProfile.Arn,PublicIp:PublicIpAddress}' || true
+            echo '```'
+            echo '### describe-instance-status'
+            echo '```json'
+            aws ec2 describe-instance-status --instance-ids "$instance" --region "$AWS_REGION" --include-all-instances \
+              --query 'InstanceStatuses[0].{System:SystemStatus.Status,Instance:InstanceStatus.Status}' || true
+            echo '```'
+            echo '### get-console-output'
+            echo '```'
+            aws ec2 get-console-output --instance-id "$instance" --region "$AWS_REGION" --output text || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo 'Sem SSH e sem SSM, o console output e a unica janela para o bootstrap.' >&2
+          exit 1
+      - name: Validate K3s platform
+        run: |
+          set -euo pipefail
+          instance='${{ steps.node.outputs.instance_id }}'
+          version=$(awk '/^  k3sVersion:/ {print $2; exit}' config/official.yml)
+
+          # O corpo do comando e montado em arquivo e serializado por jq: montar
+          # JSON com escape manual dentro de YAML quebra em silencio.
+          cat > /tmp/platform-check.sh <<EOF
+          set -euo pipefail
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          test -f /opt/oficina/BOOTSTRAP_COMPLETE
+          systemctl is-active --quiet k3s
+          k3s kubectl get nodes --no-headers | awk '{print \$2}' | grep -qx Ready
+          k3s kubectl get namespace oficina >/dev/null
+          test "\$(k3s --version | awk '/^k3s version/ {print \$3}')" = "$version"
+          echo PLATFORM_OK
+          EOF
+          jq -Rs '{commands: [.]}' < /tmp/platform-check.sh > /tmp/platform-check.json
+
+          command_id=$(aws ssm send-command \
+            --instance-ids "$instance" \
+            --document-name AWS-RunShellScript \
+            --comment 'Platform validation' \
+            --region "$AWS_REGION" \
+            --parameters file:///tmp/platform-check.json \
+            --query 'Command.CommandId' --output text)
+
+          status=Pending
+          for _ in $(seq 1 60); do
+            status=$(aws ssm get-command-invocation --command-id "$command_id" --instance-id "$instance" --region "$AWS_REGION" --query Status --output text 2>/dev/null || echo Pending)
+            case "$status" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 5
+          done
+
+          aws ssm get-command-invocation --command-id "$command_id" --instance-id "$instance" --region "$AWS_REGION" --query StandardOutputContent --output text
+          if [ "$status" != "Success" ]; then
+            aws ssm get-command-invocation --command-id "$command_id" --instance-id "$instance" --region "$AWS_REGION" --query StandardErrorContent --output text >&2
+            echo "Validacao da plataforma falhou com status $status." >&2
+            exit 1
+          fi
+
           alb=$(aws ssm get-parameter --name /oficina/infra/alb/arn --region "$AWS_REGION" --query Parameter.Value --output text)
           aws elbv2 describe-load-balancers --load-balancer-arns "$alb" --region "$AWS_REGION" --query 'LoadBalancers[0].Scheme' --output text | grep -q internal
           for service in cadastro estoque ordens; do
-            aws ssm get-parameter --name "/oficina/infra/ecs/${service}/target-group-arn" --region "$AWS_REGION" >/dev/null
-            aws ssm get-parameter --name "/oficina/infra/ecs/${service}/log-group-name" --region "$AWS_REGION" >/dev/null
+            tg=$(aws ssm get-parameter --name "/oficina/infra/services/${service}/target-group-arn" --region "$AWS_REGION" --query Parameter.Value --output text)
+            aws elbv2 describe-target-groups --target-group-arns "$tg" --region "$AWS_REGION" --query 'TargetGroups[0].TargetType' --output text | grep -qx instance
+            aws ssm get-parameter --name "/oficina/infra/services/${service}/node-port" --region "$AWS_REGION" >/dev/null
           done
       - name: Publish summary
         run: |
@@ -131,5 +272,6 @@ jobs:
             echo "- Region: ${AWS_REGION}"
             echo "- Terraform state bucket: ${TF_STATE_BUCKET}"
             echo "- Terraform state key: ${TF_STATE_KEY_PLATFORM}"
-            echo '- ECS cluster, ALB, target groups, log groups, ECR and SQS validated.'
+            echo "- K3s version: ${TF_VAR_k3s_version}"
+            echo '- Node Ready, namespace oficina, ALB, target groups (instance), ECR and SQS validated.'
           } >> "$GITHUB_STEP_SUMMARY"

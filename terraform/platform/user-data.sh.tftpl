@@ -1,0 +1,193 @@
+#!/bin/bash
+# Bootstrap do node K3s.
+# set -x permanece desabilitado: o log do cloud-init e legivel pelo console e
+# nao deve conter nada alem de mensagens de progresso.
+set -euo pipefail
+umask 077
+
+AWS_REGION='${aws_region}'
+K3S_VERSION='${k3s_version}'
+INSTALLER_URL='${installer_url}'
+INSTALLER_SHA='${installer_sha}'
+BINARY_URL='${binary_url}'
+BINARY_SHA='${binary_sha}'
+BOOTSTRAP_FLAG='${bootstrap_flag}'
+NAMESPACE='${namespace}'
+
+BASE_DIR=/opt/oficina
+LOG_PREFIX='[oficina-bootstrap]'
+
+log() {
+  echo "$LOG_PREFIX $1"
+}
+
+fail() {
+  echo "$LOG_PREFIX FALHA: $1" >&2
+  exit 1
+}
+
+rm -f "$BOOTSTRAP_FLAG"
+log "iniciando bootstrap do K3s $K3S_VERSION"
+
+# ---------------------------------------------------------------------------
+# 1. SSM Agent. Sem ele nao existe caminho de acesso operacional: nao ha SSH,
+#    nao ha key pair e a instancia nao tem IP publico.
+# ---------------------------------------------------------------------------
+log "validando SSM Agent"
+if ! systemctl list-unit-files 2>/dev/null | grep -q '^amazon-ssm-agent.service'; then
+  log "SSM Agent ausente, instalando"
+  dnf install -y amazon-ssm-agent || fail "nao foi possivel instalar o amazon-ssm-agent"
+fi
+systemctl enable --now amazon-ssm-agent || fail "nao foi possivel habilitar o amazon-ssm-agent"
+systemctl restart amazon-ssm-agent
+for attempt in $(seq 1 12); do
+  if systemctl is-active --quiet amazon-ssm-agent; then
+    break
+  fi
+  if [ "$attempt" -eq 12 ]; then
+    fail "amazon-ssm-agent nao ficou ativo"
+  fi
+  sleep 5
+done
+log "SSM Agent ativo"
+
+# ---------------------------------------------------------------------------
+# 2. Saida para a internet. A instancia depende do NAT para registrar no SSM,
+#    baixar o instalador e autenticar no ECR. Falhar aqui produz uma mensagem
+#    explicita; falhar adiante produziria um timeout sem causa aparente.
+# ---------------------------------------------------------------------------
+log "validando saida para a internet pelo NAT"
+NAT_OK=0
+for attempt in $(seq 1 10); do
+  if curl -s --max-time 10 -o /dev/null "https://s3.$AWS_REGION.amazonaws.com"; then
+    NAT_OK=1
+    break
+  fi
+  sleep 6
+done
+if [ "$NAT_OK" -ne 1 ]; then
+  fail "sem rota de saida para a internet. Verifique a rota da subnet privada para o NAT Gateway."
+fi
+log "saida para a internet confirmada"
+
+# ---------------------------------------------------------------------------
+# 3. firewalld. O isolamento de rede e responsabilidade dos security groups;
+#    manter um firewall local ativo apenas cria uma segunda fonte de bloqueio.
+# ---------------------------------------------------------------------------
+if systemctl list-unit-files 2>/dev/null | grep -q '^firewalld.service'; then
+  if systemctl is-active --quiet firewalld; then
+    log "firewalld ativo, desabilitando durante o bootstrap"
+    systemctl disable --now firewalld
+  else
+    log "firewalld presente e inativo"
+  fi
+else
+  log "firewalld nao instalado"
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Dependencias e estrutura de diretorios.
+# ---------------------------------------------------------------------------
+log "instalando dependencias"
+dnf install -y jq tar gzip || fail "nao foi possivel instalar as dependencias"
+if ! command -v aws >/dev/null 2>&1; then
+  dnf install -y awscli-2 || fail "nao foi possivel instalar o AWS CLI v2"
+fi
+aws --version 2>&1 | grep -q 'aws-cli/2' || fail "AWS CLI v2 nao disponivel"
+
+install -d -m 0700 "$BASE_DIR" "$BASE_DIR/manifests" "$BASE_DIR/scripts" "$BASE_DIR/stage" "$BASE_DIR/install"
+
+# ---------------------------------------------------------------------------
+# 5. Configuracao declarativa e instalacao do K3s.
+# ---------------------------------------------------------------------------
+log "escrevendo /etc/rancher/k3s/config.yaml"
+install -d -m 0700 /etc/rancher/k3s
+cat > /etc/rancher/k3s/config.yaml <<'K3S_CONFIG_EOF'
+${k3s_config}
+K3S_CONFIG_EOF
+chmod 0600 /etc/rancher/k3s/config.yaml
+
+log "baixando instalador oficial de commit fixo"
+curl -sSL --max-time 60 -o "$BASE_DIR/install/install.sh" "$INSTALLER_URL" \
+  || fail "nao foi possivel baixar o instalador do K3s"
+echo "$INSTALLER_SHA  $BASE_DIR/install/install.sh" | sha256sum -c - \
+  || fail "checksum do instalador divergente. Bootstrap interrompido antes da instalacao."
+log "checksum do instalador conferido"
+
+log "baixando binario do K3s $K3S_VERSION"
+curl -sSL --max-time 300 -o "$BASE_DIR/install/k3s" "$BINARY_URL" \
+  || fail "nao foi possivel baixar o binario do K3s"
+echo "$BINARY_SHA  $BASE_DIR/install/k3s" | sha256sum -c - \
+  || fail "checksum do binario do K3s divergente. Bootstrap interrompido antes da instalacao."
+log "checksum do binario conferido"
+
+install -m 0755 "$BASE_DIR/install/k3s" /usr/local/bin/k3s
+rm -f "$BASE_DIR/install/k3s"
+
+log "instalando K3s"
+INSTALL_K3S_SKIP_DOWNLOAD=true \
+INSTALL_K3S_VERSION="$K3S_VERSION" \
+  sh "$BASE_DIR/install/install.sh" || fail "instalacao do K3s falhou"
+
+systemctl enable k3s
+echo "$K3S_VERSION" > "$BASE_DIR/K3S_VERSION"
+chmod 0600 "$BASE_DIR/K3S_VERSION"
+
+# ---------------------------------------------------------------------------
+# 6. Validacao pos-bootstrap. O sinalizador so e escrito depois que o node
+#    responde Ready; o workflow consome esse sinal antes de qualquer deploy.
+# ---------------------------------------------------------------------------
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+log "aguardando o servico k3s"
+for attempt in $(seq 1 30); do
+  if systemctl is-active --quiet k3s; then
+    break
+  fi
+  if [ "$attempt" -eq 30 ]; then
+    fail "servico k3s nao ficou ativo"
+  fi
+  sleep 5
+done
+
+log "aguardando o node ficar Ready"
+NODE_READY=0
+for attempt in $(seq 1 60); do
+  if k3s kubectl get nodes --no-headers 2>/dev/null | awk '{print $2}' | grep -qx Ready; then
+    NODE_READY=1
+    break
+  fi
+  sleep 5
+done
+if [ "$NODE_READY" -ne 1 ]; then
+  k3s kubectl get nodes || true
+  fail "node nao atingiu o estado Ready"
+fi
+log "node Ready"
+
+INSTALLED_VERSION=$(k3s --version | awk '/^k3s version/ {print $3}')
+if [ "$INSTALLED_VERSION" != "$K3S_VERSION" ]; then
+  fail "versao instalada ($INSTALLED_VERSION) diferente da esperada ($K3S_VERSION)"
+fi
+log "versao instalada conferida: $INSTALLED_VERSION"
+
+log "aplicando namespace $NAMESPACE"
+cat > "$BASE_DIR/manifests/namespace.yaml" <<'NAMESPACE_EOF'
+${namespace_yaml}
+NAMESPACE_EOF
+k3s kubectl apply -f "$BASE_DIR/manifests/namespace.yaml" || fail "nao foi possivel criar o namespace"
+k3s kubectl get namespace "$NAMESPACE" >/dev/null || fail "namespace $NAMESPACE ausente apos o apply"
+
+# ---------------------------------------------------------------------------
+# 7. Conveniencia de sessao interativa. Comandos por Run Command definem o
+#    KUBECONFIG explicitamente, porque nao passam por shell de login.
+# ---------------------------------------------------------------------------
+cat > /etc/profile.d/k3s.sh <<'PROFILE_EOF'
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+export PATH="$PATH:/usr/local/bin"
+PROFILE_EOF
+chmod 0644 /etc/profile.d/k3s.sh
+
+date -u +%Y-%m-%dT%H:%M:%SZ > "$BOOTSTRAP_FLAG"
+chmod 0600 "$BOOTSTRAP_FLAG"
+log "bootstrap concluido"

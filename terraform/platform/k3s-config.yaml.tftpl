@@ -1,0 +1,15 @@
+# Configuracao declarativa do K3s.
+# Escrita antes da instalacao e sem INSTALL_K3S_EXEC: toda a configuracao vive
+# neste arquivo, auditavel em disco e preservada em upgrade do binario.
+node-name: ${node_name}
+
+# Sem Ingress Controller e sem ServiceLB: o ALB aponta direto para os NodePorts.
+disable:
+  - traefik
+  - servicelb
+
+write-kubeconfig-mode: "0600"
+
+# Criptografa os Secrets no datastore local. Protege o datastore, nao o
+# comprometimento da propria instancia, que guarda a chave no mesmo disco.
+secrets-encryption: true

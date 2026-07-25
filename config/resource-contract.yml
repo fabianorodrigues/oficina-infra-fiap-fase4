@@ -8,9 +8,9 @@ inputs:
   rdsMasterSecretArn: /oficina/infra/rds/master-secret-arn
 
 outputs:
-  clusterName: /oficina/infra/cluster/name
-  clusterArn: /oficina/infra/cluster/arn
-  ecsTaskSecurityGroupId: /oficina/infra/ecs/task-security-group-id
+  k8sInstanceId: /oficina/infra/k8s/instance-id
+  k8sSecurityGroupId: /oficina/infra/k8s/security-group-id
+  k8sNamespace: /oficina/infra/k8s/namespace
 
   albName: /oficina/infra/alb/name
   albArn: /oficina/infra/alb/arn
@@ -18,13 +18,13 @@ outputs:
   albSecurityGroupId: /oficina/infra/alb/security-group-id
   albListenerArn: /oficina/infra/alb/listener-arn
 
-  cadastroTargetGroupArn: /oficina/infra/ecs/cadastro/target-group-arn
-  estoqueTargetGroupArn: /oficina/infra/ecs/estoque/target-group-arn
-  ordensTargetGroupArn: /oficina/infra/ecs/ordens/target-group-arn
+  cadastroTargetGroupArn: /oficina/infra/services/cadastro/target-group-arn
+  estoqueTargetGroupArn: /oficina/infra/services/estoque/target-group-arn
+  ordensTargetGroupArn: /oficina/infra/services/ordens/target-group-arn
 
-  cadastroLogGroupName: /oficina/infra/ecs/cadastro/log-group-name
-  estoqueLogGroupName: /oficina/infra/ecs/estoque/log-group-name
-  ordensLogGroupName: /oficina/infra/ecs/ordens/log-group-name
+  cadastroNodePort: /oficina/infra/services/cadastro/node-port
+  estoqueNodePort: /oficina/infra/services/estoque/node-port
+  ordensNodePort: /oficina/infra/services/ordens/node-port
 
   cadastroEcr: /oficina/infra/ecr/cadastro
   estoqueEcr: /oficina/infra/ecr/estoque
@@ -56,3 +56,16 @@ secrets:
   ordensMigrationDb: /oficina/ordens/migration-db
   authDatabase: /oficina/auth/database
   authJwt: /oficina/auth/jwt
+
+# Parametros SSM removidos com o runtime anterior. Nomes registrados apenas
+# para orientar a limpeza operacional; nao sao lidos por nenhuma stack.
+retired:
+  - /oficina/infra/cluster/name
+  - /oficina/infra/cluster/arn
+  - /oficina/infra/ecs/task-security-group-id
+  - /oficina/infra/ecs/cadastro/target-group-arn
+  - /oficina/infra/ecs/estoque/target-group-arn
+  - /oficina/infra/ecs/ordens/target-group-arn
+  - /oficina/infra/ecs/cadastro/log-group-name
+  - /oficina/infra/ecs/estoque/log-group-name
+  - /oficina/infra/ecs/ordens/log-group-name

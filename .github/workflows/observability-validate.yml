@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   validate:
-    name: Validate ECS observability
+    name: Validate observability surfaces
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -23,15 +23,66 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ vars.AWS_REGION }}
-      - name: Validate log groups and metrics surface
+      - name: Validate edge log groups and ALB metrics
         run: |
           set -euo pipefail
-          cluster=$(aws ssm get-parameter --name /oficina/infra/cluster/name --region "$AWS_REGION" --query Parameter.Value --output text)
-          aws ecs describe-clusters --clusters "$cluster" --region "$AWS_REGION" --include SETTINGS >/dev/null
-          for group in /ecs/oficina/cadastro /ecs/oficina/estoque /ecs/oficina/ordens /ecs/oficina/db-bootstrap /aws/apigateway/oficina-api; do
-            aws logs describe-log-groups --log-group-name-prefix "$group" --region "$AWS_REGION" --query 'logGroups[0].logGroupName' --output text | grep -v '^None$'
-          done
-          aws cloudwatch list-metrics --namespace AWS/ECS --metric-name CPUUtilization --region "$AWS_REGION" >/dev/null
+          # Nao ha agente de logs no cluster: o diagnostico do runtime e feito por
+          # kubectl na propria instancia, e a telemetria da aplicacao vai para o
+          # New Relic quando configurado.
+          aws logs describe-log-groups --log-group-name-prefix /aws/apigateway/oficina-api \
+            --region "$AWS_REGION" --query 'logGroups[0].logGroupName' --output text | grep -v '^None$'
           aws cloudwatch list-metrics --namespace AWS/ApplicationELB --metric-name HealthyHostCount --region "$AWS_REGION" >/dev/null
+      - name: Validate queue depth and dead-letter queues
+        run: |
+          set -euo pipefail
+          for queue in estoque-comandos ordens-eventos; do
+            url=$(aws ssm get-parameter --name "/oficina/infra/sqs/${queue}/url" --region "$AWS_REGION" --query Parameter.Value --output text)
+            aws sqs get-queue-attributes --queue-url "$url" --attribute-names ApproximateNumberOfMessages \
+              --region "$AWS_REGION" --query 'Attributes.ApproximateNumberOfMessages' --output text
+
+            dlq_url=$(aws ssm get-parameter --name "/oficina/infra/sqs/${queue}-dlq/url" --region "$AWS_REGION" --query Parameter.Value --output text)
+            depth=$(aws sqs get-queue-attributes --queue-url "$dlq_url" --attribute-names ApproximateNumberOfMessages \
+              --region "$AWS_REGION" --query 'Attributes.ApproximateNumberOfMessages' --output text)
+            echo "DLQ ${queue}-dlq: ${depth} mensagem(ns)."
+            if [ "$depth" != "0" ]; then
+              echo "DLQ ${queue}-dlq com mensagens; investigar antes de considerar a validacao concluida." >&2
+              exit 1
+            fi
+          done
+      - name: Validate cluster workloads
+        run: |
+          set -euo pipefail
+          instance=$(aws ssm get-parameter --name /oficina/infra/k8s/instance-id --region "$AWS_REGION" --query Parameter.Value --output text)
+
+          cat > /tmp/observability-check.sh <<'EOF'
+          set -euo pipefail
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          k3s kubectl -n oficina get pods -o wide
+          k3s kubectl -n oficina get deployments
+          k3s kubectl describe node | sed -n '/Conditions:/,/Addresses:/p'
+          free -m
+          df -h /
+          EOF
+          jq -Rs '{commands: [.]}' < /tmp/observability-check.sh > /tmp/observability-check.json
+
+          command_id=$(aws ssm send-command --instance-ids "$instance" \
+            --document-name AWS-RunShellScript --comment 'Observability validation' \
+            --region "$AWS_REGION" --parameters file:///tmp/observability-check.json \
+            --query 'Command.CommandId' --output text)
+
+          status=Pending
+          for _ in $(seq 1 40); do
+            status=$(aws ssm get-command-invocation --command-id "$command_id" --instance-id "$instance" --region "$AWS_REGION" --query Status --output text 2>/dev/null || echo Pending)
+            case "$status" in Success|Failed|Cancelled|TimedOut) break ;; esac
+            sleep 5
+          done
+
+          {
+            echo '## Estado do cluster'
+            echo '```'
+            aws ssm get-command-invocation --command-id "$command_id" --instance-id "$instance" --region "$AWS_REGION" --query StandardOutputContent --output text
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$status" = "Success"
       - name: Publish summary
-        run: echo 'ECS, API Gateway and ALB observability surfaces validated.' >> "$GITHUB_STEP_SUMMARY"
+        run: echo 'API Gateway, ALB, SQS, DLQ and cluster workload surfaces validated.' >> "$GITHUB_STEP_SUMMARY"

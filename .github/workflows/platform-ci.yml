@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - config/**
+      - k8s/**
       - terraform/**
       - scripts/**
       - .github/workflows/platform-ci.yml
@@ -31,6 +32,12 @@ jobs:
         run: |
           set -euo pipefail
           jq empty config/entrypoint.json
+      - name: Validate YAML
+        run: |
+          set -euo pipefail
+          for f in config/official.yml config/resource-contract.yml config/solution.yml k8s/*.yaml; do
+            python3 -c "import sys, yaml; yaml.safe_load(open(sys.argv[1]))" "$f"
+          done
       - name: Validate PowerShell syntax
         shell: pwsh
         run: |
@@ -40,6 +47,25 @@ jobs:
             [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error "$($_.Extent.File): $($_.Message)" }; exit 1 }
           }
+      - name: Resolve K3s version
+        run: |
+          set -euo pipefail
+          version=$(awk '/^  k3sVersion:/ {print $2; exit}' config/official.yml)
+          if [ -z "$version" ]; then
+            echo 'kubernetes.k3sVersion not found in config/official.yml.' >&2
+            exit 1
+          fi
+          echo "TF_VAR_k3s_version=$version" >> "$GITHUB_ENV"
+      - name: Validate K3s version consistency
+        shell: pwsh
+        run: ./scripts/validate-k3s-version.ps1
+      - name: Validate namespace manifest
+        run: |
+          set -euo pipefail
+          # Validacao offline por kubeconform. "kubectl apply --dry-run=client"
+          # exige descoberta de API contra um servidor vivo, que o runner nao tem.
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar -xz -C /usr/local/bin kubeconform
+          kubeconform -strict -summary -verbose k8s/namespace.yaml
       - name: Terraform fmt platform
         working-directory: terraform/platform
         run: terraform fmt -check -recursive
@@ -58,6 +84,22 @@ jobs:
       - name: Terraform validate entrypoint
         working-directory: terraform/entrypoint
         run: terraform validate
+      - name: Check for retired runtime references
+        run: |
+          set -euo pipefail
+          # O runtime anterior nao pode sobreviver em codigo, workflow ou contrato.
+          # config/resource-contract.yml mantem a lista "retired" apenas para
+          # orientar a limpeza operacional dos parametros SSM.
+          # --exclude=platform-ci.yml evita o auto-casamento: o proprio padrao de
+          # busca e uma ocorrencia literal dentro deste arquivo.
+          if grep -rnE 'aws_ecs_|ecs run-task|deploy-ecs-fargate|FARGATE|TaskDefinition' \
+              --include=*.tf --include=*.tftpl --include=*.yml --include=*.yaml \
+              --include=*.ps1 --include=*.json \
+              --exclude=platform-ci.yml \
+              terraform config scripts k8s .github; then
+            echo 'Referencia ao runtime anterior encontrada.' >&2
+            exit 1
+          fi
       - name: Publish summary
         run: |
-          echo 'Validated platform/entrypoint Terraform, contracts and scripts.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Validated platform/entrypoint Terraform, Kubernetes manifests, contracts and scripts.' >> "$GITHUB_STEP_SUMMARY"
