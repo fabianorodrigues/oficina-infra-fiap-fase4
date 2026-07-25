@@ -8,7 +8,8 @@
 
 solution:
   name: oficina
-  ecsCluster: oficina
+  kubernetesCluster: oficina
+  kubernetesNamespace: oficina
 
 repositories:
   cadastro:

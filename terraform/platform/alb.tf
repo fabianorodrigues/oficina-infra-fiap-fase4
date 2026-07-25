@@ -21,15 +21,19 @@ resource "aws_lb_target_group" "service" {
   for_each = local.services
 
   name                 = each.value.target_group_name
-  port                 = local.container_port
+  port                 = each.value.node_port
   protocol             = "HTTP"
-  target_type          = "ip"
+  target_type          = "instance"
   vpc_id               = data.aws_ssm_parameter.vpc_id.value
   deregistration_delay = local.official.loadBalancer.deregistrationDelaySeconds
 
+  # O health check tem caminho proprio e nao depende de header: ele bate direto
+  # no NodePort, fora das regras do listener. Aponta para a prontidao real do
+  # servico, e nao para a liveness do processo.
   health_check {
     enabled             = true
-    path                = local.official.loadBalancer.healthPath
+    path                = local.official.loadBalancer.readinessPath
+    port                = "traffic-port"
     matcher             = "200"
     protocol            = "HTTP"
     interval            = 30

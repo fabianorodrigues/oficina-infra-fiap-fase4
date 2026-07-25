@@ -1,32 +1,45 @@
 project:
   name: oficina
 
-ecs:
-  name: oficina
+kubernetes:
+  clusterName: oficina
+  namespace: oficina
   containerPort: 8080
-  desiredCount: 1
-  launchType: FARGATE
+  replicas: 1
+  # Fonte unica da versao do K3s. Consumida pelo Terraform via TF_VAR_k3s_version
+  # e validada contra a documentacao por scripts/validate-k3s-version.ps1.
+  k3sVersion: v1.35.6+k3s1
+  # O instalador e obtido de um commit fixo: conteudo de commit e imutavel,
+  # portanto o par URL + checksum e reproduzivel. Canal movel nao e aceito.
+  installerCommit: 87243446a2c2fe958c31ad552fe38ebf96757b06
+  installerUrl: https://raw.githubusercontent.com/k3s-io/k3s/87243446a2c2fe958c31ad552fe38ebf96757b06/install.sh
+  installerSha256: 8598e002e61d658fed7b7542fc6d2c66d8da6eae69e088830105d2ee1ffb6d91
+  # O binario e baixado separadamente e instalado com INSTALL_K3S_SKIP_DOWNLOAD=true.
+  # O caractere '+' da versao precisa ser percent-encoded como %2B nesta URL.
+  binaryUrl: https://github.com/k3s-io/k3s/releases/download/v1.35.6%2Bk3s1/k3s
+  binarySha256: 2b52a2c1ca6eb502e2a0ffa1a4cf79eef94875926577c1e43347ed292cc92432
 
 loadBalancer:
   name: oficina
   scheme: internal
   listenerPort: 80
   healthPath: /health
+  readinessPath: /ready
   deregistrationDelaySeconds: 30
 
 services:
   cadastro:
     name: oficina-cadastro
-    targetGroupName: oficina-cadastro
-    logGroupName: /ecs/oficina/cadastro
+    targetGroupName: oficina-k8s-cadastro
+    nodePort: 30080
   estoque:
     name: oficina-estoque
-    targetGroupName: oficina-estoque
-    logGroupName: /ecs/oficina/estoque
+    targetGroupName: oficina-k8s-estoque
+    nodePort: 30081
   ordens:
     name: oficina-ordens-servico
-    targetGroupName: oficina-ordens
-    logGroupName: /ecs/oficina/ordens
+    targetGroupName: oficina-k8s-ordens
+    nodePort: 30082
 
 ecr:
   cadastro: oficina-cadastro
@@ -43,3 +56,10 @@ sqs:
   maxReceiveCount: 3
   messageRetentionSeconds: 345600
   dlqRetentionSeconds: 1209600
+
+deploy:
+  # Prefixo exclusivo dos pacotes de manifests no bucket de Terraform State.
+  # O lifecycle deste prefixo pertence ao proprietario do bucket.
+  s3Prefix: k8s-deploy/
+  presignedUrlTtlSeconds: 300
+  parameterPathPrefix: /oficina/deploy/

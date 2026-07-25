@@ -1,9 +1,9 @@
 # oficina-infra
 
-Plataforma compartilhada e ponto de entrada da solução **Oficina**: cluster **ECS Fargate**, **ALB interno**, registros de imagem, filas e **API Gateway**.
+Plataforma compartilhada e ponto de entrada da solução **Oficina**: cluster **Kubernetes (K3s single-node numa EC2 privada)**, **ALB interno**, registros de imagem, filas e **API Gateway**.
 
 ![Terraform](https://img.shields.io/badge/Terraform-1.10-7B42BC?logo=terraform&logoColor=white)
-![AWS](https://img.shields.io/badge/AWS-ECS%20Fargate%20%C2%B7%20ALB%20%C2%B7%20API%20Gateway%20%C2%B7%20ECR%20%C2%B7%20SQS-FF9900?logo=amazonaws&logoColor=white)
+![AWS](https://img.shields.io/badge/AWS-EC2%20%C2%B7%20K3s%20%C2%B7%20ALB%20%C2%B7%20API%20Gateway%20%C2%B7%20ECR%20%C2%B7%20SQS-FF9900?logo=amazonaws&logoColor=white)
 ![GitHub Actions](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)
 
 ---
@@ -26,12 +26,12 @@ Plataforma compartilhada e ponto de entrada da solução **Oficina**: cluster **
 
 ## Visão geral
 
-A **Oficina** é uma plataforma de gestão de oficina mecânica implantada na AWS e distribuída em **6 repositórios** que compõem um único sistema. O cliente acessa uma **API Gateway HTTP**, que autentica na borda por uma **Lambda authorizer** e encaminha o tráfego, via **VPC Link**, para um **ALB interno** que roteia para três microsserviços **.NET 10 em ECS Fargate**. Os serviços se comunicam por HTTP interno e por filas **SQS FIFO**, e persistem em um **RDS SQL Server** compartilhado.
+A **Oficina** é uma plataforma de gestão de oficina mecânica implantada na AWS e distribuída em **6 repositórios** que compõem um único sistema. O cliente acessa uma **API Gateway HTTP**, que autentica na borda por uma **Lambda authorizer** e encaminha o tráfego, via **VPC Link**, para um **ALB interno** que roteia para três microsserviços **.NET 10 em Kubernetes (K3s single-node numa EC2 privada)**. Os serviços se comunicam por HTTP interno e por filas **SQS FIFO**, e persistem em um **RDS SQL Server** compartilhado.
 
 | Repositório | Responsabilidade | Etapas |
 |---|---|:---:|
 | [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4) | Rede, banco de dados, segredos e estado do Terraform | 1 e 3 |
-| **oficina-infra** *(este)* | Plataforma ECS/ALB e entrada de API | 2 e 8 |
+| **oficina-infra** *(este)* | Plataforma Kubernetes/ALB e entrada de API | 2 e 8 |
 | [oficina-auth-lambda](https://github.com/fabianorodrigues/oficina-auth-lambda-fiap-fase4) | Autenticação por CPF e validação de token | 4 |
 | [oficina-cadastro](https://github.com/fabianorodrigues/oficina-cadastro-fiap-fase4) | Clientes, veículos, funcionários e catálogo de serviços | 5 |
 | [oficina-estoque](https://github.com/fabianorodrigues/oficina-estoque-fiap-fase4) | Peças, insumos, saldos e reservas | 6 |
@@ -60,7 +60,7 @@ As etapas 5, 6 e 7 não dependem entre si e podem rodar em paralelo; a numeraç�
 Entre as etapas 5 e 8 há uma reexecução do **Database Bootstrap** com `provision_admin_user` = `true`, que cria o administrador inicial exigido pela etapa 9 — documentada em [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4#usuário-administrador-inicial--segunda-execução-do-bootstrap).
 
 > [!IMPORTANT]
-> O **Platform Deploy** (etapa 2) cria o cluster ECS, o ALB e os *target groups*, mas **não cria os serviços** — cada serviço se registra no seu *target group* ao ser publicado nas etapas 5 a 7. O **Entrypoint Deploy** (etapa 8) valida a saúde de cada destino antes de aplicar, por isso só roda **depois** das etapas 4 a 7.
+> O **Platform Deploy** (etapa 2) provisiona a EC2 com K3s, o ALB e os *target groups*, mas **não cria os workloads** — cada serviço se registra no seu *target group* ao ser publicado nas etapas 5 a 7. O **Entrypoint Deploy** (etapa 8) valida a saúde de cada destino antes de aplicar, por isso só roda **depois** das etapas 4 a 7.
 
 ---
 
@@ -70,9 +70,9 @@ Entre as etapas 5 e 8 há uma reexecução do **Database Bootstrap** com `provis
 
 ```mermaid
 flowchart TB
-    subgraph Plataforma["Cluster ECS Fargate + ALB interno"]
+    subgraph Plataforma["K3s single-node + ALB interno"]
         direction TB
-        Cluster["ECS Cluster<br/>Container Insights"]
+        Cluster["EC2 privada<br/>K3s single-node"]
         ALB["ALB interno<br/>listener HTTP + regras por path"]
         TG["3 target groups<br/>cadastro · estoque · ordens"]
         ALB --> TG
@@ -95,7 +95,7 @@ flowchart TB
     class SSM pub
 ```
 
-Cria: cluster ECS, ALB interno (listener HTTP, regras de roteamento por path e por *header* de saúde), *target groups* por serviço, grupos de segurança (ALB, tasks ECS e acesso das tasks ao RDS), grupos de log, 4 repositórios ECR (imutáveis, com varredura ao enviar e retenção das 20 últimas imagens) e 4 filas SQS FIFO (comandos e eventos, cada uma com sua *dead-letter queue*).
+Cria: EC2 privada com K3s (Amazon Linux 2023, sem SSH e sem IP público, acesso apenas por Systems Manager), ALB interno (listener HTTP, regras de roteamento por path e por *header* de saúde), *target groups* por serviço com `target_type = instance` e health check em `/ready`, grupos de segurança (ALB, node do K3s e acesso do node ao RDS), 4 repositórios ECR (imutáveis, com varredura ao enviar e retenção das 20 últimas imagens) e 4 filas SQS FIFO (comandos e eventos, cada uma com sua *dead-letter queue*).
 
 ### Stack `entrypoint` — etapa 8
 
@@ -135,11 +135,10 @@ O autorizador valida o token na borda e devolve as *claims*. A API Gateway as co
 
 | Recurso | Caminho | Consumido por |
 |---|---|---|
-| Cluster ECS | `/oficina/infra/cluster/{name,arn}` | serviços, bootstrap |
-| Grupo de segurança das tasks | `/oficina/infra/ecs/task-security-group-id` | serviços, bootstrap |
+| Node do cluster | `/oficina/infra/k8s/{instance-id,security-group-id,namespace}` | serviços, bootstrap |
 | ALB interno | `/oficina/infra/alb/{name,arn,dns-name,listener-arn,security-group-id}` | serviços, entrypoint |
-| Target groups | `/oficina/infra/ecs/{cadastro,estoque,ordens}/target-group-arn` | serviços |
-| Grupos de log | `/oficina/infra/ecs/{cadastro,estoque,ordens}/log-group-name` | serviços |
+| Target groups | `/oficina/infra/services/{cadastro,estoque,ordens}/target-group-arn` | serviços |
+| NodePorts | `/oficina/infra/services/{cadastro,estoque,ordens}/node-port` | serviços |
 | Registros de imagem | `/oficina/infra/ecr/{cadastro,estoque,ordens,db-bootstrap}` | serviços, bootstrap |
 | Filas SQS | `/oficina/infra/sqs/{estoque-comandos,ordens-eventos}[-dlq]/{url,arn}` | estoque, ordens |
 | API Gateway | `/oficina/infra/api/{id,url,execution-arn,stage,vpc-link-id}` | validação ponta a ponta |
@@ -170,7 +169,7 @@ Configure em **Settings → Secrets and variables → Actions** do repositório.
 Toda a infraestrutura deste repositório é criada pelos workflows, e **todas as variáveis do Terraform têm valor padrão**. A forma dos recursos (nomes, portas, retenção do ECR, tempos das filas, rotas da API) vem dos arquivos em `config/`, versionados junto ao código — ajustes são feitos por pull request, não por *variables* do GitHub.
 
 > [!NOTE]
-> O stack `platform` **não cria papéis IAM**. Os serviços ECS assumem as roles de execução e de aplicação informadas nos próprios deploys de cadastro, estoque e ordens (variáveis `ECS_TASK_EXECUTION_ROLE_ARN` e `ECS_TASK_ROLE_ARN`, documentadas naqueles repositórios).
+> O stack `platform` **não cria nem altera papéis IAM**. Ele apenas associa à EC2 o instance profile pré-existente informado na variável `INSTANCE_PROFILE_NAME`. Os Pods herdam essa role pelo IMDSv2 com hop limit 2; nenhum Pod recebe credencial estática.
 
 > [!WARNING]
 > **Pré-requisito não provisionado aqui:** o bucket S3 de estado do Terraform, criado na **etapa 1** por [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4). Os workflows deste repositório verificam sua existência e **falham imediatamente** se ele não existir. Os segredos e parâmetros da etapa 1 também são verificados antes do plano.
@@ -201,7 +200,7 @@ Valida o ALB da plataforma (interno, listener HTTP, *target groups*) e as Lambda
 
 **Actions → Observability Validate → Run workflow**
 
-Fora da sequência numerada. Não exige confirmação e é **somente leitura**: verifica o cluster ECS, a existência dos grupos de log (serviços, bootstrap e API Gateway) e a presença das métricas de ECS e do ALB no CloudWatch. Pode ser executado a qualquer momento após a etapa 8.
+Fora da sequência numerada. Não exige confirmação e é **somente leitura**: verifica o log group do API Gateway, as métricas do ALB no CloudWatch, a profundidade das filas e das DLQs e, por Systems Manager, o estado dos Pods, dos Deployments e da capacidade do node. Pode ser executado a qualquer momento após a etapa 8.
 
 ---
 
@@ -211,12 +210,12 @@ Fora da sequência numerada. Não exige confirmação e é **somente leitura**: 
 
 | Serviço | O que verificar |
 |---|---|
-| **ECS** | Cluster `ACTIVE` com Container Insights; após as etapas 5 a 7, 3 serviços com tasks em execução |
+| **EC2** | Instância `running`, `Online` no Systems Manager; após as etapas 5 a 7, 3 Deployments disponíveis |
 | **EC2 → Load Balancers** | ALB com esquema **interno** e destinos saudáveis |
 | **ECR** | 4 repositórios, com imagem enviada após as etapas 3 e 5 a 7 |
 | **SQS** | 4 filas FIFO, cada fila principal com política de redirecionamento para a DLQ |
 | **API Gateway** | HTTP API com estágio padrão, autorizador do tipo requisição e VPC Link `Available` |
-| **CloudWatch → Log groups** | Grupos `/ecs/oficina/*` e `/aws/apigateway/oficina-api` presentes |
+| **CloudWatch → Log groups** | Grupo `/aws/apigateway/oficina-api` presente |
 
 ### Pela AWS CLI
 
@@ -226,16 +225,17 @@ Fora da sequência numerada. Não exige confirmação e é **somente leitura**: 
 ```bash
 REGIAO=<sua-regiao>
 
-# Cluster e serviços ECS
-CLUSTER=$(aws ssm get-parameter --name /oficina/infra/cluster/name \
+# Node do cluster
+INSTANCIA=$(aws ssm get-parameter --name /oficina/infra/k8s/instance-id \
   --region "$REGIAO" --query 'Parameter.Value' --output text)
-aws ecs describe-clusters --clusters "$CLUSTER" --region "$REGIAO" \
-  --query 'clusters[0].status' --output text
-aws ecs list-services --cluster "$CLUSTER" --region "$REGIAO" --output table
+aws ec2 describe-instances --instance-ids "$INSTANCIA" --region "$REGIAO" \
+  --query 'Reservations[0].Instances[0].State.Name' --output text
+aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$INSTANCIA" \
+  --region "$REGIAO" --query 'InstanceInformationList[0].PingStatus' --output text
 
 # ALB interno e saúde dos destinos
 for s in cadastro estoque ordens; do
-  TG=$(aws ssm get-parameter --name "/oficina/infra/ecs/$s/target-group-arn" \
+  TG=$(aws ssm get-parameter --name "/oficina/infra/services/$s/target-group-arn" \
     --region "$REGIAO" --query 'Parameter.Value' --output text)
   echo -n "$s -> "
   aws elbv2 describe-target-health --target-group-arn "$TG" --region "$REGIAO" \
@@ -260,10 +260,10 @@ O que está efetivamente ativo hoje:
 
 | Sinal | Onde |
 |---|---|
-| Logs das tasks ECS | Grupos `/ecs/oficina/{cadastro,estoque,ordens,db-bootstrap}` |
+| Logs dos workloads | `k3s kubectl logs` na EC2, por Systems Manager; sem agente de logs no cluster |
 | Log de acesso da API | Grupo `/aws/apigateway/oficina-api`, retenção de 14 dias, sem dados sensíveis |
-| Métricas de contêiner | Container Insights no cluster ECS |
-| Métricas de plataforma | `AWS/ECS` e `AWS/ApplicationELB` no CloudWatch |
+| Capacidade do node | `free -m`, `df -h` e `crictl stats`, validados após cada deploy |
+| Métricas de plataforma | `AWS/ApplicationELB` no CloudWatch |
 | Rastreamento distribuído | X-Ray nas Lambdas de autenticação |
 
 > [!NOTE]

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: oficina
+  labels:
+    app.kubernetes.io/part-of: oficina
+    app.kubernetes.io/managed-by: oficina-infra-fiap-fase4
