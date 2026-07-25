@@ -67,5 +67,7 @@ provisioningOrder:
   - Estoque Deploy
   - Ordens Deploy
   - Entrypoint Deploy
-  - AWS E2E Validate
+  - Collection Postman
+
+optionalValidations:
   - Observability Validate

@@ -31,13 +31,13 @@ A **Oficina** é uma plataforma de gestão de oficina mecânica implantada na AW
 | Repositório | Responsabilidade | Etapas |
 |---|---|:---:|
 | [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4) | Rede, banco de dados, segredos e estado do Terraform | 1 e 3 |
-| **oficina-infra** *(este)* | Plataforma ECS/ALB e entrada de API | 2, 6 e 7 |
+| **oficina-infra** *(este)* | Plataforma ECS/ALB e entrada de API | 2 e 8 |
 | [oficina-auth-lambda](https://github.com/fabianorodrigues/oficina-auth-lambda-fiap-fase4) | Autenticação por CPF e validação de token | 4 |
 | [oficina-cadastro](https://github.com/fabianorodrigues/oficina-cadastro-fiap-fase4) | Clientes, veículos, funcionários e catálogo de serviços | 5 |
-| [oficina-estoque](https://github.com/fabianorodrigues/oficina-estoque-fiap-fase4) | Peças, insumos, saldos e reservas | 5 |
-| [oficina-ordens-servico](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4) | Ordens de serviço, orçamento e saga de pagamento | 5 e 8 |
+| [oficina-estoque](https://github.com/fabianorodrigues/oficina-estoque-fiap-fase4) | Peças, insumos, saldos e reservas | 6 |
+| [oficina-ordens-servico](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4) | Ordens de serviço, orçamento e saga de pagamento | 7 e 9 |
 
-**Papel deste repositório:** contém dois stacks Terraform independentes. O **`platform`** (etapa 2) cria a infraestrutura onde os serviços rodam. O **`entrypoint`** (etapa 6) cria a fachada pública da API, que só pode ser aplicada depois que as Lambdas de autenticação e os três serviços estiverem no ar.
+**Papel deste repositório:** contém dois stacks Terraform independentes. O **`platform`** (etapa 2) cria a infraestrutura onde os serviços rodam. O **`entrypoint`** (etapa 8) cria a fachada pública da API, que só pode ser aplicada depois que as Lambdas de autenticação e os três serviços estiverem no ar.
 
 ---
 
@@ -49,13 +49,18 @@ A **Oficina** é uma plataforma de gestão de oficina mecânica implantada na AW
 | **2** | **oficina-infra** | **Platform Deploy** | `APPLY` |
 | 3 | oficina-infra-db | Database Bootstrap | `BOOTSTRAP` |
 | 4 | oficina-auth-lambda | Auth Deploy | `DEPLOY` |
-| 5 | cadastro · estoque · ordens-servico | Deploy | `DEPLOY` |
-| **6** | **oficina-infra** | **Entrypoint Deploy** | `APPLY` |
-| **7** | **oficina-infra** | **Observability Validate** | — |
-| 8 | oficina-ordens-servico | AWS E2E Validate | `VALIDATE` |
+| 5 | oficina-cadastro | Cadastro Deploy | `DEPLOY` |
+| 6 | oficina-estoque | Estoque Deploy | `DEPLOY` |
+| 7 | oficina-ordens-servico | Ordens Deploy | `DEPLOY` |
+| **8** | **oficina-infra** | **Entrypoint Deploy** | `APPLY` |
+| 9 | oficina-ordens-servico | Collection Postman (execução manual) | — |
+
+As etapas 5, 6 e 7 não dependem entre si e podem rodar em paralelo; a numeração indica a ordem recomendada.
+
+Entre as etapas 5 e 8 há uma reexecução do **Database Bootstrap** com `provision_admin_user` = `true`, que cria o administrador inicial exigido pela etapa 9 — documentada em [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4#usuário-administrador-inicial--segunda-execução-do-bootstrap).
 
 > [!IMPORTANT]
-> O **Platform Deploy** (etapa 2) cria o cluster ECS, o ALB e os *target groups*, mas **não cria os serviços** — cada serviço se registra no seu *target group* ao ser publicado na etapa 5. O **Entrypoint Deploy** (etapa 6) valida a saúde de cada destino antes de aplicar, por isso só roda **depois** das etapas 4 e 5.
+> O **Platform Deploy** (etapa 2) cria o cluster ECS, o ALB e os *target groups*, mas **não cria os serviços** — cada serviço se registra no seu *target group* ao ser publicado nas etapas 5 a 7. O **Entrypoint Deploy** (etapa 8) valida a saúde de cada destino antes de aplicar, por isso só roda **depois** das etapas 4 a 7.
 
 ---
 
@@ -92,7 +97,7 @@ flowchart TB
 
 Cria: cluster ECS, ALB interno (listener HTTP, regras de roteamento por path e por *header* de saúde), *target groups* por serviço, grupos de segurança (ALB, tasks ECS e acesso das tasks ao RDS), grupos de log, 4 repositórios ECR (imutáveis, com varredura ao enviar e retenção das 20 últimas imagens) e 4 filas SQS FIFO (comandos e eventos, cada uma com sua *dead-letter queue*).
 
-### Stack `entrypoint` — etapa 6
+### Stack `entrypoint` — etapa 8
 
 ```mermaid
 flowchart LR
@@ -184,19 +189,19 @@ Verifica o bucket de estado e os parâmetros da etapa 1 → valida o plano → a
 
 Duração típica: 5 a 10 minutos.
 
-### Etapa 6 — Entrypoint Deploy
+### Etapa 8 — Entrypoint Deploy
 
-Execute **apenas depois** das etapas 4 e 5.
+Execute **apenas depois** das etapas 4 a 7.
 
 **Actions → Entrypoint Deploy → Run workflow → `confirmation` = `APPLY`**
 
-Valida o ALB da plataforma (interno, listener HTTP, *target groups*) e as Lambdas de autenticação (com alias `live`) → valida o plano → aplica a API Gateway, o VPC Link e as integrações → aguarda o VPC Link ficar `AVAILABLE` → executa validação somente leitura e teste de fumaça na API. Se falhar por destino não saudável, a causa quase sempre está na etapa 5.
+Valida o ALB da plataforma (interno, listener HTTP, *target groups*) e as Lambdas de autenticação (com alias `live`) → valida o plano → aplica a API Gateway, o VPC Link e as integrações → aguarda o VPC Link ficar `AVAILABLE` → executa validação somente leitura e teste de fumaça na API. Se falhar por destino não saudável, a causa quase sempre está em um dos serviços das etapas 5 a 7.
 
-### Etapa 7 — Observability Validate
+### Observability Validate — opcional
 
 **Actions → Observability Validate → Run workflow**
 
-Não exige confirmação e é **somente leitura**. Verifica o cluster ECS, a existência dos grupos de log (serviços, bootstrap e API Gateway) e a presença das métricas de ECS e do ALB no CloudWatch.
+Fora da sequência numerada. Não exige confirmação e é **somente leitura**: verifica o cluster ECS, a existência dos grupos de log (serviços, bootstrap e API Gateway) e a presença das métricas de ECS e do ALB no CloudWatch. Pode ser executado a qualquer momento após a etapa 8.
 
 ---
 
@@ -206,9 +211,9 @@ Não exige confirmação e é **somente leitura**. Verifica o cluster ECS, a exi
 
 | Serviço | O que verificar |
 |---|---|
-| **ECS** | Cluster `ACTIVE` com Container Insights; após a etapa 5, 3 serviços com tasks em execução |
+| **ECS** | Cluster `ACTIVE` com Container Insights; após as etapas 5 a 7, 3 serviços com tasks em execução |
 | **EC2 → Load Balancers** | ALB com esquema **interno** e destinos saudáveis |
-| **ECR** | 4 repositórios, com imagem enviada após as etapas 3 e 5 |
+| **ECR** | 4 repositórios, com imagem enviada após as etapas 3 e 5 a 7 |
 | **SQS** | 4 filas FIFO, cada fila principal com política de redirecionamento para a DLQ |
 | **API Gateway** | HTTP API com estágio padrão, autorizador do tipo requisição e VPC Link `Available` |
 | **CloudWatch → Log groups** | Grupos `/ecs/oficina/*` e `/aws/apigateway/oficina-api` presentes |
@@ -237,7 +242,7 @@ for s in cadastro estoque ordens; do
     --query 'TargetHealthDescriptions[].TargetHealth.State' --output text
 done
 
-# Verificação de saúde pela API pública (após a etapa 6)
+# Verificação de saúde pela API pública (após a etapa 8)
 API=$(aws ssm get-parameter --name /oficina/infra/api/url \
   --region "$REGIAO" --query 'Parameter.Value' --output text)
 for s in cadastro estoque ordens; do
@@ -262,7 +267,7 @@ O que está efetivamente ativo hoje:
 | Rastreamento distribuído | X-Ray nas Lambdas de autenticação |
 
 > [!NOTE]
-> **Não há painéis, alarmes, tópicos de notificação nem coletor OpenTelemetry.** A observabilidade em vigor é a descrita acima. Use o **Observability Validate** (etapa 7) para conferir automaticamente que cluster, grupos de log e métricas estão presentes.
+> **Não há painéis, alarmes, tópicos de notificação nem coletor OpenTelemetry.** A observabilidade em vigor é a descrita acima. Use o **Observability Validate** (opcional) para conferir automaticamente que cluster, grupos de log e métricas estão presentes.
 
 ---
 
@@ -296,5 +301,14 @@ terraform validate
 
 ## Próximas etapas
 
-- Após o **Platform Deploy** (etapa 2) → volte a [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4) para o **Database Bootstrap** (etapa 3).
-- Após o **Entrypoint Deploy** (etapa 6) → execute o **Observability Validate** (etapa 7) e conclua em [oficina-ordens-servico](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4) com o **AWS E2E Validate** (etapa 8).
+Este repositório é executado duas vezes na sequência. O destino depende da etapa que você acabou de concluir.
+
+**Depois da etapa 2 (Platform Deploy) → etapa 3, obrigatória.**
+Pré-condição: cluster `ACTIVE`, ALB interno e os 4 repositórios ECR criados.
+**→ [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4)** — seção [Como executar → Etapa 3](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4#etapa-3--database-bootstrap), que cria os bancos, logins e permissões.
+
+**Depois da etapa 8 (Entrypoint Deploy) → etapa 9, obrigatória.**
+Pré-condição: API Gateway aplicada, VPC Link `AVAILABLE` e os três destinos saudáveis no ALB.
+**→ [oficina-ordens-servico](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4)** — seção [Como executar → Etapa 9](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4#etapa-9--collection-postman-execução-manual), a validação funcional pela collection Postman que encerra a sequência.
+
+**Opcional, a qualquer momento após a etapa 8:** [Observability Validate](#observability-validate--opcional), neste mesmo repositório.

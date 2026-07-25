@@ -1,4 +1,4 @@
-﻿name: Platform Deploy
+name: Platform Deploy
 
 on:
   workflow_dispatch:
@@ -26,7 +26,7 @@ jobs:
       TF_STATE_BUCKET_FALLBACK: ${{ vars.TF_STATE_BUCKET }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Validate request
         shell: pwsh
         run: |
@@ -35,7 +35,7 @@ jobs:
           if ('${{ inputs.confirmation }}' -cne 'APPLY') { throw 'Confirmation must be APPLY.' }
           if ([string]::IsNullOrWhiteSpace($env:AWS_REGION)) { throw 'Repository Variable AWS_REGION is required.' }
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v5
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -59,7 +59,7 @@ jobs:
           "TF_STATE_BUCKET=$bucket" | Add-Content -Path $env:GITHUB_ENV
           "AWS_ACCOUNT_ID=$($identity.Account)" | Add-Content -Path $env:GITHUB_ENV
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: 1.10.5
       - name: Setup TFLint
