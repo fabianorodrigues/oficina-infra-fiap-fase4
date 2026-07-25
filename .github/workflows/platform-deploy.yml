@@ -148,6 +148,20 @@ jobs:
               | select((.change.actions | index("delete")) != null)
               | .address ] | .[]' tfplan.json)
 
+          k3s_replace=$(jq -r '
+            [ .resource_changes[]?
+              | select(.address == "aws_instance.k3s")
+              | select((.change.actions | index("delete")) != null and (.change.actions | index("create")) != null)
+            ] | length' tfplan.json)
+          echo "K3S_REPLACE=$k3s_replace" >> "$GITHUB_ENV"
+          if [ "$k3s_replace" -ne 0 ]; then
+            {
+              echo '## K3s node replacement detected'
+              echo
+              echo 'This apply will replace the single-node K3s host. After Platform Deploy succeeds, redeploy Cadastro, Estoque, Ordens and then Entrypoint.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
           blocked=0
           for address in $destructive; do
             if printf '%s' "$allow_json" | jq -e --arg a "$address" 'index($a) != null' >/dev/null; then
@@ -274,4 +288,9 @@ jobs:
             echo "- Terraform state key: ${TF_STATE_KEY_PLATFORM}"
             echo "- K3s version: ${TF_VAR_k3s_version}"
             echo '- Node Ready, namespace oficina, ALB, target groups (instance), ECR and SQS validated.'
+            if [ "${K3S_REPLACE:-0}" != "0" ]; then
+              echo '- K3s node was replaced: redeploy Cadastro, Estoque, Ordens and then Entrypoint.'
+            else
+              echo '- K3s node replacement: not detected in this plan.'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

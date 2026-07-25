@@ -30,7 +30,7 @@ A **Oficina** é uma plataforma de gestão de oficina mecânica implantada na AW
 
 | Repositório | Responsabilidade | Etapas |
 |---|---|:---:|
-| [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4) | Rede, banco de dados, segredos e estado do Terraform | 1 e 3 |
+| [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4) | Rede, banco de dados, segredos, estado do Terraform e admin inicial | 1, 3 e 5.1 |
 | **oficina-infra** *(este)* | Plataforma Kubernetes/ALB e entrada de API | 2 e 8 |
 | [oficina-auth-lambda](https://github.com/fabianorodrigues/oficina-auth-lambda-fiap-fase4) | Autenticação por CPF e validação de token | 4 |
 | [oficina-cadastro](https://github.com/fabianorodrigues/oficina-cadastro-fiap-fase4) | Clientes, veículos, funcionários e catálogo de serviços | 5 |
@@ -47,17 +47,16 @@ A **Oficina** é uma plataforma de gestão de oficina mecânica implantada na AW
 |:---:|---|---|:---:|
 | 1 | oficina-infra-db | Database Infrastructure Deploy | `APPLY` |
 | **2** | **oficina-infra** | **Platform Deploy** | `APPLY` |
-| 3 | oficina-infra-db | Database Bootstrap | `BOOTSTRAP` |
+| 3 | oficina-infra-db | Database Bootstrap (estrutura) | `BOOTSTRAP` |
 | 4 | oficina-auth-lambda | Auth Deploy | `DEPLOY` |
 | 5 | oficina-cadastro | Cadastro Deploy | `DEPLOY` |
+| 5.1 | oficina-infra-db | Initial Admin Provision | `PROVISION_ADMIN` |
 | 6 | oficina-estoque | Estoque Deploy | `DEPLOY` |
 | 7 | oficina-ordens-servico | Ordens Deploy | `DEPLOY` |
 | **8** | **oficina-infra** | **Entrypoint Deploy** | `APPLY` |
 | 9 | oficina-ordens-servico | Collection Postman (execução manual) | — |
 
-As etapas 5, 6 e 7 não dependem entre si e podem rodar em paralelo; a numeração indica a ordem recomendada.
-
-Entre as etapas 5 e 8 há uma reexecução do **Database Bootstrap** com `provision_admin_user` = `true`, que cria o administrador inicial exigido pela etapa 9 — documentada em [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4#usuário-administrador-inicial--segunda-execução-do-bootstrap).
+As etapas 6 e 7 não dependem do admin inicial e podem rodar em paralelo se desejado; a numeração indica a ordem recomendada. A etapa **5.1** é obrigatória no primeiro provisionamento do ambiente e opcional em redeploys quando o admin já existe. Ela cria a credencial exigida pela etapa 9 e está documentada em [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4#etapa-51-admin-inicial).
 
 > [!IMPORTANT]
 > O **Platform Deploy** (etapa 2) provisiona a EC2 com K3s, o ALB e os *target groups*, mas **não cria os workloads** — cada serviço se registra no seu *target group* ao ser publicado nas etapas 5 a 7. O **Entrypoint Deploy** (etapa 8) valida a saúde de cada destino antes de aplicar, por isso só roda **depois** das etapas 4 a 7.
@@ -308,7 +307,7 @@ Pré-condição: cluster `ACTIVE`, ALB interno e os 4 repositórios ECR criados.
 **→ [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4)** — seção [Como executar → Etapa 3](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4#etapa-3--database-bootstrap), que cria os bancos, logins e permissões.
 
 **Depois da etapa 8 (Entrypoint Deploy) → etapa 9, obrigatória.**
-Pré-condição: API Gateway aplicada, VPC Link `AVAILABLE` e os três destinos saudáveis no ALB.
+Pré-condição: API Gateway aplicada, VPC Link `AVAILABLE`, os três destinos saudáveis no ALB e etapa 5.1 concluída no primeiro provisionamento do ambiente.
 **→ [oficina-ordens-servico](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4)** — seção [Como executar → Etapa 9](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4#etapa-9--collection-postman-execução-manual), a validação funcional pela collection Postman que encerra a sequência.
 
 **Opcional, a qualquer momento após a etapa 8:** [Observability Validate](#observability-validate--opcional), neste mesmo repositório.
