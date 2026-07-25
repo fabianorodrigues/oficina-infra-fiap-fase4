@@ -26,7 +26,7 @@ try {
     throw "Entrypoint config validation failed: invalid JSON. $($_.Exception.Message)"
 }
 
-# --- API identity ----------------------------------------------------------
+# API identity
 $api = $config.api
 if ($null -eq $api) { Add-Failure 'Missing api section.' }
 else {
@@ -36,12 +36,12 @@ else {
     if ($api.disableExecuteApiEndpoint -ne $false) { Add-Failure 'api.disableExecuteApiEndpoint must be false (execute-api endpoint is the public entrypoint).' }
 }
 
-# --- VPC Link --------------------------------------------------------------
+# VPC Link
 $vpcLink = $config.vpcLink
 if ($null -eq $vpcLink) { Add-Failure 'Missing vpcLink section.' }
 elseif ($vpcLink.name -ne 'oficina') { Add-Failure "vpcLink.name must be 'oficina' (found '$($vpcLink.name)')." }
 
-# --- Integration payload formats -------------------------------------------
+# Integration payload formats
 $integration = $config.integration
 if ($null -eq $integration) { Add-Failure 'Missing integration section.' }
 else {
@@ -52,7 +52,7 @@ else {
     if ($null -eq $timeout -or $timeout -lt 1 -or $timeout -gt 30000) { Add-Failure "integration.timeoutMilliseconds must be between 1 and 30000 (found '$($integration.timeoutMilliseconds)')." }
 }
 
-# --- Authorizer ------------------------------------------------------------
+# Authorizer
 $auth = $config.auth
 if ($null -eq $auth) { Add-Failure 'Missing auth section.' }
 else {
@@ -66,7 +66,7 @@ else {
     }
 }
 
-# --- SSM parameter paths ---------------------------------------------------
+# SSM parameter paths
 $ssmPaths = [System.Collections.Generic.List[string]]::new()
 foreach ($section in @($config.vpcLink, $config.auth)) {
     if ($null -eq $section) { continue }
@@ -86,7 +86,7 @@ foreach ($p in $ssmPaths) {
     if (-not $p.StartsWith('/oficina/')) { Add-Failure "SSM parameter '$p' must start with '/oficina/'." }
 }
 
-# --- Throttling ------------------------------------------------------------
+# Throttling
 $throttling = $config.throttling
 if ($null -eq $throttling) { Add-Failure 'Missing throttling section.' }
 else {
@@ -94,7 +94,7 @@ else {
     if (($throttling.burstLimit -as [int]) -lt 1) { Add-Failure 'throttling.burstLimit must be a positive integer.' }
 }
 
-# --- CORS ------------------------------------------------------------------
+# CORS
 $cors = $config.cors
 if ($null -ne $cors -and $cors.enabled -eq $true) {
     if (@($cors.allowOrigins).Count -eq 0) { Add-Failure 'cors.enabled=true requires explicit allowOrigins.' }
@@ -103,7 +103,7 @@ if ($null -ne $cors -and $cors.enabled -eq $true) {
     }
 }
 
-# --- Routes ----------------------------------------------------------------
+# Routes
 $routes = @($config.routes)
 if ($routes.Count -lt 1) { Add-Failure 'At least one route is required.' }
 
@@ -161,7 +161,7 @@ foreach ($k in $routeKeys) {
     if ($seen.ContainsKey($k)) { Add-Failure "Duplicate route key '$k'." } else { $seen[$k] = $true }
 }
 
-# --- No secrets or real AWS values -----------------------------------------
+# No secrets or real AWS values
 if ($raw -match 'subnet-[0-9a-fA-F]{8,}') { Add-Failure 'Config must not contain a real subnet ID.' }
 if ($raw -match 'sg-[0-9a-fA-F]{8,}') { Add-Failure 'Config must not contain a real security group ID.' }
 if ($raw -match 'arn:aws') { Add-Failure 'Config must not contain a real ARN.' }
@@ -174,7 +174,7 @@ if ($raw -match 'eyJ[A-Za-z0-9_-]{10,}') { Add-Failure 'Config must not contain 
 if ($raw -match '(?i)fase\s*-?\s*3') { Add-Failure 'Config must not reference the previous phase.' }
 if ($raw -match '(?i)(-dev|-hml|-staging|-prod)(\b|["/])') { Add-Failure 'Config must not use dev/hml/staging/prod environment suffixes.' }
 
-# --- Result ----------------------------------------------------------------
+# Result
 if ($script:Failures.Count -gt 0) {
     Write-Host ''
     Write-Host 'Entrypoint configuration is INVALID:' -ForegroundColor Red

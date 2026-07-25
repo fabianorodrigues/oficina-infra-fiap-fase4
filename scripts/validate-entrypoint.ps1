@@ -48,11 +48,11 @@ function Get-Ssm([string]$Name) {
 
 Write-Host "Read-only Entrypoint validation in region $Region"
 
-# 0. Identity.
+# Identity.
 $identity = Invoke-Aws @('sts', 'get-caller-identity')
 Add-Ok "Caller account $($identity.Account)"
 
-# 1. API exists, HTTP protocol, execute-api endpoint enabled.
+# API exists, HTTP protocol, execute-api endpoint enabled.
 $apis = Invoke-Aws @('apigatewayv2', 'get-apis')
 $api = @($apis.Items | Where-Object { $_.Name -eq $ApiName })[0]
 if ($null -eq $api) { throw "API '$ApiName' not found." }
@@ -62,7 +62,7 @@ $apiExecutionArn = "arn:${partition}:execute-api:${Region}:$($identity.Account):
 if ($api.ProtocolType -ne 'HTTP') { Add-Failure "API protocol is '$($api.ProtocolType)', expected HTTP." } else { Add-Ok 'API protocol HTTP' }
 if ($api.DisableExecuteApiEndpoint -eq $true) { Add-Failure 'execute-api endpoint is disabled.' } else { Add-Ok 'execute-api endpoint enabled' }
 
-# 2. Stage $default with access logs and throttling.
+# Stage $default with access logs and throttling.
 $stages = Invoke-Aws @('apigatewayv2', 'get-stages', '--api-id', $apiId)
 $stage = @($stages.Items | Where-Object { $_.StageName -eq '$default' })[0]
 if ($null -eq $stage) { Add-Failure 'Stage $default not found.' }
@@ -72,7 +72,7 @@ else {
     if ($null -eq $stage.DefaultRouteSettings -or $null -eq $stage.DefaultRouteSettings.ThrottlingRateLimit) { Add-Failure 'Stage throttling is not configured.' } else { Add-Ok "Throttling rate $($stage.DefaultRouteSettings.ThrottlingRateLimit)" }
 }
 
-# 3. VPC Link AVAILABLE with private subnets and dedicated SG.
+# VPC Link AVAILABLE with private subnets and dedicated SG.
 $vpcLinks = Invoke-Aws @('apigatewayv2', 'get-vpc-links')
 $vpcLink = @($vpcLinks.Items | Where-Object { $_.Name -eq $VpcLinkName })[0]
 if ($null -eq $vpcLink) { Add-Failure "VPC Link '$VpcLinkName' not found." }
@@ -85,7 +85,7 @@ else {
     Add-Ok "VPC Link subnets $($vpcLink.SubnetIds -join ',')"
 }
 
-# 4. Internal ALB, listener HTTP 80, listener ARN used by integrations. The ALB
+# Internal ALB, listener HTTP 80, listener ARN used by integrations. The ALB
 #    is discovered by name and tags, not by an SSM handoff.
 $lb = Invoke-Aws @('elbv2', 'describe-load-balancers', '--names', $AlbName)
 $albArn = $lb.LoadBalancers[0].LoadBalancerArn
@@ -95,7 +95,7 @@ $listener80 = @($listeners.Listeners | Where-Object { $_.Port -eq 80 -and $_.Pro
 if ($null -eq $listener80) { Add-Failure 'ALB HTTP 80 listener not found.' } else { Add-Ok 'ALB HTTP 80 listener present' }
 $listenerArn = $listener80.ListenerArn
 
-# 5. Integrations point to the listener ARN (private) or the Auth alias (lambda).
+# Integrations point to the listener ARN (private) or the Auth alias (lambda).
 $integrations = Invoke-Aws @('apigatewayv2', 'get-integrations', '--api-id', $apiId)
 $albIntegrations = @($integrations.Items | Where-Object { $_.ConnectionType -eq 'VPC_LINK' })
 foreach ($i in $albIntegrations) {
@@ -112,7 +112,7 @@ foreach ($i in $lambdaIntegrations) {
 }
 if ($lambdaIntegrations.Count -ge 1) { Add-Ok 'Auth Lambda integration uses payload 2.0 and the live alias invoke URI' }
 
-# 6. Authorizer: REQUEST, payload 2.0, simple responses, TTL 0, live alias.
+# Authorizer: REQUEST, payload 2.0, simple responses, TTL 0, live alias.
 $authorizers = Invoke-Aws @('apigatewayv2', 'get-authorizers', '--api-id', $apiId)
 $authorizer = @($authorizers.Items)[0]
 if ($null -eq $authorizer) { Add-Failure 'No authorizer found.' }
@@ -125,7 +125,7 @@ else {
     if ($script:Failures.Count -eq 0) { Add-Ok 'Authorizer REQUEST/2.0/simple/TTL0/live' }
 }
 
-# 7. Routes: match the contract, no catch-all, protected use the authorizer.
+# Routes: match the contract, no catch-all, protected use the authorizer.
 $routes = Invoke-Aws @('apigatewayv2', 'get-routes', '--api-id', $apiId)
 $deployedKeys = @($routes.Items | ForEach-Object { $_.RouteKey })
 $expectedKeys = @($config.routes | ForEach-Object { [string]$_.routeKey })
@@ -143,7 +143,7 @@ foreach ($rt in $routes.Items) {
 }
 Add-Ok "$($deployedKeys.Count) routes deployed"
 
-# 8. Lambda permissions and live aliases exist.
+# Lambda permissions and live aliases exist.
 foreach ($fnParam in @($config.auth.authCpfFunctionNameParameter, $config.auth.authorizerFunctionNameParameter)) {
     $fn = Get-Ssm $fnParam
     $alias = Invoke-Aws @('lambda', 'get-alias', '--function-name', $fn, '--name', $config.auth.alias)
@@ -158,17 +158,17 @@ foreach ($fnParam in @($config.auth.authCpfFunctionNameParameter, $config.auth.a
     }
 }
 
-# 9. Access log group exists.
+# Access log group exists.
 $logGroup = Invoke-Aws @('logs', 'describe-log-groups', '--log-group-name-prefix', $config.logging.logGroupName)
 if (@($logGroup.logGroups | Where-Object { $_.logGroupName -eq $config.logging.logGroupName }).Count -lt 1) { Add-Failure "Access log group '$($config.logging.logGroupName)' not found." } else { Add-Ok 'Access log group present' }
 
-# 10. SSM outputs published.
+# SSM outputs published.
 foreach ($prop in $config.ssmOutputs.PSObject.Properties) {
     $val = Get-Ssm $prop.Value
     if ([string]::IsNullOrWhiteSpace($val)) { Add-Failure "SSM output '$($prop.Value)' is empty." } else { Add-Ok "SSM $($prop.Value) published" }
 }
 
-# --- Result ----------------------------------------------------------------
+# Result
 if ($script:Failures.Count -gt 0) {
     Write-Host ''
     Write-Host 'Entrypoint deployment is INVALID:' -ForegroundColor Red
