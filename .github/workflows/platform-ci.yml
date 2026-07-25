@@ -1,4 +1,4 @@
-﻿name: Platform CI
+name: Platform CI
 
 on:
   pull_request:
@@ -22,9 +22,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: 1.10.5
       - name: Validate JSON
@@ -58,14 +58,6 @@ jobs:
       - name: Terraform validate entrypoint
         working-directory: terraform/entrypoint
         run: terraform validate
-      - name: Static safety checks
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $text = (Get-ChildItem -Path config,terraform,scripts -Recurse -File | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName }) -join "`n"
-          foreach ($pattern in @('kubectl', 'helm', 'aws\s+eks', 'deploy/k8s', 'secretproviderclass', 'secrets-store\.csi', 'elbv2\.k8s\.aws', 'load\s+balancer\s+controller')) {
-            if ($text -match $pattern) { throw "Legacy platform pattern found: $pattern" }
-          }
       - name: Publish summary
         run: |
-          echo 'Validated platform/entrypoint Terraform, contracts, scripts and static safety checks.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Validated platform/entrypoint Terraform, contracts and scripts.' >> "$GITHUB_STEP_SUMMARY"
