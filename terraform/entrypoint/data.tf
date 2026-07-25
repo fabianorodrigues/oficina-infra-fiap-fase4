@@ -2,7 +2,7 @@ data "aws_region" "current" {}
 
 data "aws_partition" "current" {}
 
-# --- Networking (Infra DB / Platform) resolved from SSM ---------------------
+# Networking (Infra DB / Platform) resolved from SSM
 data "aws_ssm_parameter" "vpc_id" {
   name = local.entrypoint.vpcLink.vpcIdParameter
 }
@@ -15,7 +15,7 @@ data "aws_ssm_parameter" "private_subnet_2" {
   name = local.entrypoint.vpcLink.privateSubnet2Parameter
 }
 
-# --- Internal ALB (Platform stack) -----------------------------------------
+# Internal ALB (Platform stack)
 # The platform stack creates the private ALB and listener consumed by the VPC
 # Link integration.
 data "aws_lb" "internal" {
@@ -32,7 +32,7 @@ data "aws_security_group" "alb" {
   id       = each.value
 }
 
-# --- Auth Lambdas (Auth stack) resolved from SSM ----------------------------
+# Auth Lambdas (Auth stack) resolved from SSM
 # The Auth stack publishes function-name and alias-arn (live). It does not
 # publish a bare function ARN, so the integration and authorizer use the alias
 # ARN and permissions use function-name + qualifier=live.

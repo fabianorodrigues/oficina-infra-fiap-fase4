@@ -1,6 +1,6 @@
 resource "aws_cloudwatch_log_group" "service" {
-  #checkov:skip=CKV_AWS_158:CloudWatch managed encryption is acceptable for this non-sensitive application log group in the course environment.
-  #checkov:skip=CKV_AWS_338:Retention is intentionally configurable and defaults to 14 days to control lab cost.
+  #checkov:skip=CKV_AWS_158:No customer-managed KMS key is provisioned; this non-sensitive application log group uses default CloudWatch encryption.
+  #checkov:skip=CKV_AWS_338:Retention is configurable and defaults to 14 days; multi-year retention is out of scope for this solution.
 
   for_each = local.services
 
@@ -11,8 +11,8 @@ resource "aws_cloudwatch_log_group" "service" {
 }
 
 resource "aws_cloudwatch_log_group" "db_bootstrap" {
-  #checkov:skip=CKV_AWS_158:CloudWatch managed encryption is acceptable for this non-sensitive bootstrap log group in the course environment.
-  #checkov:skip=CKV_AWS_338:Retention is intentionally configurable and defaults to 14 days to control lab cost.
+  #checkov:skip=CKV_AWS_158:No customer-managed KMS key is provisioned; this non-sensitive bootstrap log group uses default CloudWatch encryption.
+  #checkov:skip=CKV_AWS_338:Retention is configurable and defaults to 14 days; multi-year retention is out of scope for this solution.
 
   name              = "/ecs/oficina/db-bootstrap"
   retention_in_days = var.log_retention_days
