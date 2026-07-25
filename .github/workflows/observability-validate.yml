@@ -6,6 +6,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: observability-validate
+  cancel-in-progress: true
+
 jobs:
   validate:
     name: Validate observability surfaces

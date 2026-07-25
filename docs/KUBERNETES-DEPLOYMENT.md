@@ -315,12 +315,17 @@ sob `retired`, apenas para orientar a limpeza operacional:
 |:---:|---|---|:---:|
 | 1 | oficina-infra-db | Database Infrastructure Deploy | `APPLY` |
 | 2 | oficina-infra | Platform Deploy | `APPLY` |
-| 3 | oficina-infra-db | Database Bootstrap | `BOOTSTRAP` |
+| 3 | oficina-infra-db | Database Bootstrap (estrutura) | `BOOTSTRAP` |
 | 4 | oficina-auth-lambda | Auth Deploy | `DEPLOY` |
 | 5 | oficina-cadastro | Cadastro Deploy | `DEPLOY` |
+| 5.1 | oficina-infra-db | Initial Admin Provision | `PROVISION_ADMIN` |
 | 6 | oficina-estoque | Estoque Deploy | `DEPLOY` |
 | 7 | oficina-ordens-servico | Ordens Deploy | `DEPLOY` |
 | 8 | oficina-infra | Entrypoint Deploy | `APPLY` |
+
+O Initial Admin Provision depende das migrations do Cadastro, por isso aparece
+depois da etapa 5. Ele e obrigatorio no primeiro provisionamento do ambiente e
+opcional em redeploys normais quando o admin inicial ja existe.
 
 O **Platform Deploy** aceita `allow_replace` com **enderecos Terraform exatos**
 liberados para substituicao. Tipos de recurso nunca sao liberados em bloco:
