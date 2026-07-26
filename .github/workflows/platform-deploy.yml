@@ -293,10 +293,31 @@ jobs:
           cat > /tmp/platform-check.sh <<EOF
           set -euo pipefail
           export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+          for _ in \$(seq 1 60); do
+            if test -f /opt/oficina/BOOTSTRAP_COMPLETE; then break; fi
+            sleep 5
+          done
           test -f /opt/oficina/BOOTSTRAP_COMPLETE
+
+          for _ in \$(seq 1 60); do
+            if systemctl is-active --quiet k3s; then break; fi
+            sleep 5
+          done
           systemctl is-active --quiet k3s
+
+          for _ in \$(seq 1 60); do
+            if k3s kubectl get nodes --no-headers 2>/dev/null | awk '{print \$2}' | grep -qx Ready; then break; fi
+            sleep 5
+          done
           k3s kubectl get nodes --no-headers | awk '{print \$2}' | grep -qx Ready
+
+          for _ in \$(seq 1 60); do
+            if k3s kubectl get namespace oficina >/dev/null 2>&1; then break; fi
+            sleep 5
+          done
           k3s kubectl get namespace oficina >/dev/null
+
           test "\$(k3s --version | awk '/^k3s version/ {print \$3}')" = "$version"
           echo PLATFORM_OK
           EOF
