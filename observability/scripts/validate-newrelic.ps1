@@ -195,69 +195,69 @@ $sinceClause
     [pscustomobject]@{ Ok = $count -gt 0; Detail = "$count instancia(s) do Collector" }
 } | Out-Null
 
-# Descoberta informativa dos tipos K8s*Sample. Os atributos encontrados vao para
-# o relatorio para que widget e alerta sejam conferidos contra o que a conta tem
-# de fato. Esta descoberta NAO reprova: o gate obrigatorio abaixo consulta
-# diretamente os atributos que o dashboard versiona, sem depender do formato do
-# retorno de keyset() -- inferir o gate desse formato ja reprovou execucao com
-# coleta saudavel.
-Write-Step 'Descoberta dos atributos de Kubernetes (gate 11)'
-foreach ($sample in @('K8sNodeSample', 'K8sPodSample', 'K8sContainerSample')) {
-    try {
-        $rows = Invoke-Nrql -Query "FROM $sample SELECT keyset() SINCE 30 minutes ago"
-        $keys = @()
-        foreach ($row in $rows) {
-            foreach ($prop in $row.PSObject.Properties) {
-                if ($prop.Value -is [string]) {
-                    $keys += $prop.Value
-                }
-                elseif ($prop.Value -is [System.Collections.IEnumerable]) {
-                    foreach ($item in $prop.Value) {
-                        if ($null -ne $item) { $keys += [string]$item }
-                    }
-                }
-                elseif ($null -ne $prop.Value) {
-                    $keys += [string]$prop.Value
-                }
-            }
-        }
-        $keys = @($keys | Sort-Object -Unique)
-        if ($keys.Count -gt 0) {
-            # A amostra e o que torna a descoberta diagnosticavel: sem ela, uma
-            # leitura errada aparece como um numero e nao ha como conferir.
-            $amostra = @($keys | Select-Object -First 8) -join ', '
-            Add-Check -Name "keyset() de $sample" -Status 'ok' -Detail "$($keys.Count) atributo(s): $amostra"
-        }
-        else {
-            Add-Check -Name "keyset() de $sample" -Status 'pendente' -Detail 'Nenhum atributo no periodo: widget e alerta ficam pendentes de descoberta.'
-        }
-    }
-    catch {
-        Add-Check -Name "keyset() de $sample" -Status 'pendente' -Detail $_.Exception.Message
-    }
-}
-
-# Coleta de CPU e memoria do node e requisito, entao o gate consulta exatamente
-# os atributos que os widgets de Kubernetes renderizam: se estes contarem zero, o
-# dashboard tambem esta vazio. count() de atributo ausente devolve zero, nao erro.
+# Descoberta das metricas de Kubernetes (gate 11).
 #
-# Por polling com janela propria: quem coleta metrica de node e o DaemonSet do
-# Collector, criado minutos antes nesta mesma execucao. Ja houve reprovacao com o
-# Pod ainda em PodInitializing -- a coleta estava correta, so nao tinha comecado.
+# O Collector desta instalacao e o OTel (nr-k8s-otel-collector): ele publica
+# metricas dimensionais em Metric -- k8s.node.*, k8s.pod.*, container.* pelo
+# kubeletstats e kube_* pelo kube-state-metrics. Os eventos K8sNodeSample,
+# K8sPodSample e K8sContainerSample vem do agente de infraestrutura
+# (nri-kubernetes), que NAO faz parte deste chart: consultar aqueles tipos
+# reprovava com a coleta inteira funcionando.
+#
+# O gate nao fixa nome de metrica: exige que exista alguma metrica de node com
+# cpu e alguma com memoria, e publica o inventario completo para que widget e
+# alerta sejam escritos sobre nome confirmado, nunca sobre suposicao.
+#
+# Janela propria: quem coleta metrica de node e o DaemonSet do Collector, criado
+# minutos antes nesta mesma execucao e ja observado ainda em PodInitializing.
+Write-Step 'Descoberta das metricas de Kubernetes (gate 11)'
+$script:MetricasK8s = @()
+
 Wait-ForSignal -Name 'CPU e memoria do node presentes' -Required -TimeoutOverrideSeconds 600 -Query @"
-FROM K8sNodeSample SELECT count(cpuUsedCores) AS 'cpu', count(memoryWorkingSetUtilization) AS 'memoria'
-WHERE clusterName = '$($config.ClusterName)'
+FROM Metric SELECT uniques(metricName, 500)
+WHERE metricName LIKE 'k8s.%' OR metricName LIKE 'container.%' OR metricName LIKE 'kube_%'
 SINCE 30 minutes ago
 "@ -Predicate {
     param($rows)
-    $linha = if ($rows.Count -gt 0) { $rows[0] } else { $null }
-    $cpu = [double](Get-NrqlValue -Row $linha -Name 'cpu')
-    $memoria = [double](Get-NrqlValue -Row $linha -Name 'memoria')
+
+    $nomes = @()
+    foreach ($row in $rows) {
+        foreach ($prop in $row.PSObject.Properties) {
+            if ($prop.Value -is [string]) {
+                $nomes += $prop.Value
+            }
+            elseif ($prop.Value -is [System.Collections.IEnumerable]) {
+                foreach ($item in $prop.Value) {
+                    if ($null -ne $item) { $nomes += [string]$item }
+                }
+            }
+        }
+    }
+
+    $nomes = @($nomes | Sort-Object -Unique)
+    $script:MetricasK8s = $nomes
+
+    $cpu = @($nomes | Where-Object { $_ -like 'k8s.node.*' -and $_ -match '(?i)cpu' })
+    $memoria = @($nomes | Where-Object { $_ -like 'k8s.node.*' -and $_ -match '(?i)mem' })
+
     [pscustomobject]@{
-        Ok     = $cpu -gt 0 -and $memoria -gt 0
-        Detail = "cpuUsedCores=$cpu memoryWorkingSetUtilization=$memoria"
+        Ok     = $cpu.Count -gt 0 -and $memoria.Count -gt 0
+        Detail = if ($cpu.Count -gt 0 -and $memoria.Count -gt 0) {
+            "cpu: $($cpu -join ', ') | memoria: $($memoria -join ', ')"
+        }
+        else {
+            "$($nomes.Count) metrica(s) de Kubernetes e nenhuma de node com cpu/memoria. Amostra: $(@($nomes | Select-Object -First 15) -join ', ')"
+        }
     }
 } | Out-Null
+
+# Inventario completo no log: e a partir dele que as queries de widget e de
+# condicao sao escritas sem adivinhar nome de metrica.
+if ($script:MetricasK8s.Count -gt 0) {
+    Write-Host "  metricas de Kubernetes disponiveis ($($script:MetricasK8s.Count)):"
+    foreach ($metrica in $script:MetricasK8s) { Write-Host "    $metrica" }
+    Add-Check -Name 'Inventario de metricas de Kubernetes' -Status 'ok' -Detail "$($script:MetricasK8s.Count) metrica(s); lista completa no log do passo"
+}
 
 Write-Step 'Descoberta dos Kubernetes Events (gate 10)'
 $eventFound = $false
