@@ -1,4 +1,4 @@
-# Contract assertions evaluated during plan. The authoritative hard gate is
+# Contract assertions evaluated during plan. The authoritative blocking check is
 # scripts/validate-entrypoint-config.ps1 (CI, non-zero exit). These checks give
 # early plan-time signal and document the invariants.
 check "entrypoint_contract" {

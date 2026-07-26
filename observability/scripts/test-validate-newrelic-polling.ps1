@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Nao chama New Relic. O objetivo e garantir que sinais opcionais de aplicacao
-    nao segurem a primeira passagem do Observability Deploy.
+    nao segurem diagnosticos manuais do script de validacao.
 #>
 [CmdletBinding()]
 param()
@@ -41,7 +41,7 @@ if ($whileIndex -lt 0) {
     throw 'Wait-ForSignal nao tem polling para sinais obrigatorios.'
 }
 if ($optionalIndex -gt $whileIndex) {
-    throw 'Caminho opcional aparece depois do loop de polling; isso ainda segura application_signals_required=false.'
+    throw 'Caminho opcional aparece depois do loop de polling; isso ainda segura diagnosticos manuais.'
 }
 
 $optionalBlock = $body.Substring($optionalIndex, $whileIndex - $optionalIndex)
@@ -49,7 +49,7 @@ if ($optionalBlock -notmatch 'Invoke-Nrql') {
     throw 'Caminho opcional deve fazer uma unica leitura rapida antes de marcar pendente.'
 }
 if ($optionalBlock -match 'Start-Sleep') {
-    throw 'Caminho opcional contem Start-Sleep e pode atrasar a primeira passagem.'
+    throw 'Caminho opcional contem Start-Sleep e pode atrasar diagnosticos manuais.'
 }
 if ($optionalBlock -notmatch "Status 'pendente'") {
     throw 'Caminho opcional nao registra pendencia.'

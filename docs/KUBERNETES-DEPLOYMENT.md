@@ -318,14 +318,20 @@ sob `retired`, apenas para orientar a limpeza operacional:
 | 3 | oficina-infra-db | Database Bootstrap (estrutura) | `BOOTSTRAP` |
 | 4 | oficina-auth-lambda | Auth Deploy | `DEPLOY` |
 | 5 | oficina-cadastro | Cadastro Deploy | `DEPLOY` |
-| 5.1 | oficina-infra-db | Initial Admin Provision | `PROVISION_ADMIN` |
-| 6 | oficina-estoque | Estoque Deploy | `DEPLOY` |
-| 7 | oficina-ordens-servico | Ordens Deploy | `DEPLOY` |
-| 8 | oficina-infra | Entrypoint Deploy | `APPLY` |
+| 6 | oficina-infra-db | Initial Admin Provision | `PROVISION_ADMIN` |
+| 7 | oficina-estoque | Estoque Deploy | `DEPLOY` |
+| 8 | oficina-ordens-servico | Ordens Deploy | `DEPLOY` |
+| 9 | oficina-infra | Entrypoint Deploy | `APPLY` |
+| 10 | oficina-infra | Observability Deploy | `DEPLOY` |
+| 11 | oficina-ordens-servico | Collection Postman | — |
 
 O Initial Admin Provision depende das migrations do Cadastro, por isso aparece
 depois da etapa 5. Ele e obrigatorio no primeiro provisionamento do ambiente e
 opcional em redeploys normais quando o admin inicial ja existe.
+
+O Observability Deploy roda depois do Entrypoint porque depende da URL publica
+em `/oficina/infra/api/url` para criar/atualizar os Synthetic Monitors e validar
+os sinais de aplicacao.
 
 O **Platform Deploy** aceita `allow_replace` com **enderecos Terraform exatos**
 liberados para substituicao. Tipos de recurso nunca sao liberados em bloco:

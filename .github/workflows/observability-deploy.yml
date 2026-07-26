@@ -1,36 +1,27 @@
 name: Observability Deploy
 
-# Substitui o Observability Validate, preservando tudo que ele ja validava:
-# log groups do API Gateway, metricas do ALB, profundidade de filas, DLQ zerada e
-# estado do cluster.
+# Fluxo unico pos-Entrypoint.
 #
-# Duas passagens. A primeira pode rodar logo apos o Platform Deploy, antes dos
-# workloads e antes do Entrypoint: instala o Collector para que as APIs ja nascam
-# apontando para o gateway OTLP. Recursos que dependem da URL publica ou de Pods
-# das APIs ficam pendentes ate a segunda passagem.
-#
-#   1. validation_only=false  application_signals_required=false
-#   2. deploy Cadastro, Estoque, Ordens e depois Entrypoint
-#   3. validation_only=true   application_signals_required=true
-#   4. consolidacao manual apenas se a reconciliacao final da New Relic falhar.
+# DEPLOY instala/atualiza o Collector, provisiona New Relic por upsert
+# (dashboard, alertas, Synthetics e notificacao opcional) e valida os sinais.
+# VALIDATE e somente leitura: nao cria Secret, nao roda Helm apply, nao aplica
+# Kubernetes e nao executa mutations NerdGraph.
 
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: 'DEPLOY altera recursos; VALIDATE somente revalida.'
+        required: true
+        default: 'DEPLOY'
+        type: choice
+        options:
+          - DEPLOY
+          - VALIDATE
       confirmation:
-        description: 'Digite DEPLOY para confirmar. Em validation_only some com essa exigencia.'
+        description: 'Digite DEPLOY quando mode=DEPLOY. Para VALIDATE pode ficar vazio.'
         required: false
         default: ''
-      validation_only:
-        description: 'true = nao altera K3s/Helm/Secret; com application_signals_required=true e URL publica, reconcilia New Relic antes de validar.'
-        type: boolean
-        required: false
-        default: false
-      application_signals_required:
-        description: 'true = exigir logs, spans, metricas HTTP e service.version das tres APIs. Use apenas depois do redeploy.'
-        type: boolean
-        required: false
-        default: false
 
 permissions:
   contents: read
@@ -45,22 +36,18 @@ jobs:
   observability:
     name: Provisionar e validar observabilidade
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       NEW_RELIC_ACCOUNT_ID: ${{ vars.NEW_RELIC_ACCOUNT_ID }}
       NEW_RELIC_REGION: ${{ vars.NEW_RELIC_REGION }}
       NEW_RELIC_NOTIFICATION_EMAIL: ${{ vars.NEW_RELIC_NOTIFICATION_EMAIL }}
-      VALIDATION_ONLY: ${{ inputs.validation_only }}
-      APPLICATION_SIGNALS_REQUIRED: ${{ inputs.application_signals_required }}
+      OBSERVABILITY_MODE: ${{ inputs.mode }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      # 1. Resolver o que esta configurado, sem transformar observabilidade em
-      # pre-requisito do repositorio. Se faltar AWS ou New Relic, os passos
-      # correspondentes viram no-op e apenas as validacoes estaticas rodam.
-      - name: Resolve optional observability configuration
+      - name: Resolve observability configuration
         id: config
         shell: pwsh
         env:
@@ -75,7 +62,6 @@ jobs:
           CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $validationOnly = $env:VALIDATION_ONLY -eq 'true'
 
           function Test-Configured {
             param([string[]]$Values)
@@ -92,6 +78,11 @@ jobs:
             Add-Content -LiteralPath $env:GITHUB_ENV -Value "$($Name.ToUpperInvariant())=$text"
           }
 
+          $mode = $env:OBSERVABILITY_MODE.Trim().ToUpperInvariant()
+          if ($mode -notin @('DEPLOY', 'VALIDATE')) {
+            throw "Modo invalido: $env:OBSERVABILITY_MODE. Use DEPLOY ou VALIDATE."
+          }
+
           $awsRegion = if ([string]::IsNullOrWhiteSpace($env:AWS_REGION)) { '' } else { $env:AWS_REGION.Trim() }
           $newRelicRegion = if ([string]::IsNullOrWhiteSpace($env:NEW_RELIC_REGION)) { 'US' } else { $env:NEW_RELIC_REGION.Trim().ToUpperInvariant() }
           if ($newRelicRegion -notin @('US', 'EU')) {
@@ -102,52 +93,41 @@ jobs:
           $newRelicManagementConfigured = Test-Configured @($env:NEW_RELIC_ACCOUNT_ID, $env:NEW_RELIC_USER_API_KEY)
           $newRelicProvisioningConfigured = $newRelicManagementConfigured -and (Test-Configured @($env:NEW_RELIC_LICENSE_KEY))
 
-          if ($newRelicManagementConfigured -and $env:NEW_RELIC_ACCOUNT_ID -notmatch '^\d+$') {
-            throw "NEW_RELIC_ACCOUNT_ID deve ser numerico quando informado."
+          if (-not $awsConfigured) {
+            throw 'AWS_REGION, AWS_ACCESS_KEY_ID e AWS_SECRET_ACCESS_KEY sao obrigatorios para Observability Deploy.'
+          }
+          if (-not $newRelicManagementConfigured) {
+            throw 'NEW_RELIC_ACCOUNT_ID e NEW_RELIC_USER_API_KEY sao obrigatorios para Observability Deploy.'
+          }
+          if ($env:NEW_RELIC_ACCOUNT_ID -notmatch '^\d+$') {
+            throw 'NEW_RELIC_ACCOUNT_ID deve ser numerico.'
           }
 
-          $collectorStepEnabled = $awsConfigured -and ($validationOnly -or $newRelicProvisioningConfigured)
-          $otlpEndpointValidationEnabled = $awsConfigured -and (-not $validationOnly) -and $newRelicProvisioningConfigured
-          $newRelicProvisioningEnabled = $awsConfigured -and (-not $validationOnly) -and $newRelicProvisioningConfigured
-          $newRelicValidationEnabled = $awsConfigured -and $newRelicManagementConfigured -and ($validationOnly -or $newRelicProvisioningConfigured)
-
-          if ($newRelicProvisioningEnabled) {
+          if ($mode -eq 'DEPLOY') {
             if ($env:GITHUB_REF -ne 'refs/heads/main') {
               throw "Deploy so a partir de refs/heads/main (atual: $env:GITHUB_REF)."
             }
             if ($env:CONFIRMATION -cne 'DEPLOY') {
               throw 'Confirmacao invalida. Digite DEPLOY para executar o caminho que altera recursos.'
             }
+            if (-not $newRelicProvisioningConfigured) {
+              throw 'NEW_RELIC_LICENSE_KEY e obrigatoria no modo DEPLOY para instalar/atualizar o Collector.'
+            }
           }
 
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "new_relic_region=$newRelicRegion"
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "NEW_RELIC_REGION=$newRelicRegion"
-          if (-not [string]::IsNullOrWhiteSpace($awsRegion)) {
-            Add-Content -LiteralPath $env:GITHUB_ENV -Value "AWS_REGION=$awsRegion"
-          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "AWS_REGION=$awsRegion"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "OBSERVABILITY_MODE=$mode"
 
-          Set-Flag -Name 'aws_configured' -Value $awsConfigured
-          Set-Flag -Name 'new_relic_management_configured' -Value $newRelicManagementConfigured
-          Set-Flag -Name 'new_relic_provisioning_configured' -Value $newRelicProvisioningConfigured
-          Set-Flag -Name 'collector_step_enabled' -Value $collectorStepEnabled
-          Set-Flag -Name 'otlp_endpoint_validation_enabled' -Value $otlpEndpointValidationEnabled
-          Set-Flag -Name 'new_relic_provisioning_enabled' -Value $newRelicProvisioningEnabled
-          Set-Flag -Name 'new_relic_validation_enabled' -Value $newRelicValidationEnabled
+          Set-Flag -Name 'collector_deploy_enabled' -Value ($mode -eq 'DEPLOY')
+          Set-Flag -Name 'collector_validate_enabled' -Value ($mode -eq 'VALIDATE')
+          Set-Flag -Name 'new_relic_provisioning_enabled' -Value ($mode -eq 'DEPLOY')
 
-          Write-Host "Modo: $(if ($validationOnly) { 'validacao (somente leitura)' } else { 'provisionamento' })"
-          Write-Host "Sinais de aplicacao obrigatorios: $env:APPLICATION_SIGNALS_REQUIRED"
+          Write-Host "Modo: $mode"
           Write-Host "AWS configurada: $awsConfigured"
           Write-Host "New Relic management configurado: $newRelicManagementConfigured"
           Write-Host "New Relic provisioning configurado: $newRelicProvisioningConfigured"
-          if (-not $awsConfigured) {
-            Write-Host 'AWS nao configurada: passos que consultam SSM, CloudWatch, SQS, EC2 e cluster serao ignorados.'
-          }
-          if (-not $newRelicManagementConfigured) {
-            Write-Host 'New Relic nao configurado: validacao remota e provisionamento NerdGraph serao ignorados.'
-          }
-          elseif (-not $newRelicProvisioningConfigured) {
-            Write-Host 'NEW_RELIC_LICENSE_KEY ausente: instalacao do Collector sera ignorada; validation_only ainda pode validar e reconciliar recursos New Relic que nao dependem da license key.'
-          }
 
       - name: Validate observability config
         shell: pwsh
@@ -165,6 +145,10 @@ jobs:
         shell: pwsh
         run: ./observability/scripts/test-nerdgraph-query-contract.ps1
 
+      - name: Test New Relic upsert contract
+        shell: pwsh
+        run: ./observability/scripts/test-newrelic-upsert-contract.ps1
+
       - name: Test Helm operation contract
         shell: pwsh
         run: ./observability/scripts/test-helm-operation-contract.ps1
@@ -179,8 +163,11 @@ jobs:
         shell: pwsh
         run: ./observability/scripts/test-validate-newrelic-polling.ps1
 
+      - name: Test Observability workflow contract
+        shell: pwsh
+        run: ./observability/scripts/test-observability-workflow-contract.ps1
+
       - name: Configure AWS credentials
-        if: ${{ steps.config.outputs.aws_configured == 'true' }}
         uses: aws-actions/configure-aws-credentials@v5
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -188,9 +175,7 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # 2. Resolver EC2, namespace e URL publica existentes.
       - name: Resolve platform outputs
-        if: ${{ steps.config.outputs.aws_configured == 'true' }}
         id: platform
         shell: bash
         run: |
@@ -200,32 +185,26 @@ jobs:
           namespace=$(aws ssm get-parameter --name /oficina/infra/k8s/namespace \
             --region "$AWS_REGION" --query Parameter.Value --output text)
 
-          # A URL publica pode nao existir ainda: os Synthetic Monitors so sao
-          # criados depois que ela resolve.
           api_url=$(aws ssm get-parameter --name /oficina/infra/api/url \
             --region "$AWS_REGION" --query Parameter.Value --output text 2>/dev/null || echo '')
           if [ "$api_url" = 'None' ]; then
             api_url=''
           fi
-          api_ready=false
-          if [ -n "$api_url" ]; then
-            api_ready=true
+          if [ -z "$api_url" ]; then
+            echo 'URL publica ausente em /oficina/infra/api/url. Execute o Entrypoint Deploy antes do Observability Deploy.' >&2
+            exit 1
           fi
 
+          echo "::add-mask::$api_url"
           echo "instance=$instance" >> "$GITHUB_OUTPUT"
           echo "namespace=$namespace" >> "$GITHUB_OUTPUT"
           echo "api_url=$api_url" >> "$GITHUB_OUTPUT"
-          echo "api_ready=$api_ready" >> "$GITHUB_OUTPUT"
+          echo "api_ready=true" >> "$GITHUB_OUTPUT"
           echo "correlation_id=observability-validation-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
 
-          echo "node: $instance | namespace: $namespace"
-          if [ -z "$api_url" ]; then
-            echo 'URL publica indisponivel: monitores e requisicoes de origem serao registrados como pendentes.'
-          fi
+          echo "node: $instance | namespace: $namespace | API publica resolvida"
 
-      # 3. Aguardar EC2 Online no SSM.
       - name: Wait for SSM Online
-        if: ${{ steps.config.outputs.aws_configured == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -243,32 +222,29 @@ jobs:
           echo "node $instance nao ficou Online no Systems Manager." >&2
           exit 1
 
-      # Passos 4 a 11 do install: Helm, baseline, classificacao, SecureString,
-      # Secret versionado, template com post-renderer, upgrade e gates.
       - name: Install or update the New Relic Collector
-        if: ${{ steps.config.outputs.collector_step_enabled == 'true' }}
+        if: ${{ steps.config.outputs.collector_deploy_enabled == 'true' }}
         shell: pwsh
         env:
           NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $argumentos = @{
-            AwsRegion = $env:AWS_REGION
-            RunId     = $env:GITHUB_RUN_ID
-          }
-          if ($env:VALIDATION_ONLY -eq 'true') {
-            $argumentos['ValidationOnly'] = $true
-          }
-          else {
-            $argumentos['LicenseKey'] = $env:NEW_RELIC_LICENSE_KEY
-          }
-          ./observability/scripts/install-newrelic-collector.ps1 @argumentos
+          ./observability/scripts/install-newrelic-collector.ps1 `
+            -AwsRegion $env:AWS_REGION `
+            -RunId $env:GITHUB_RUN_ID `
+            -LicenseKey $env:NEW_RELIC_LICENSE_KEY
 
-      # 8. Validar o endpoint OTLP interno. Na primeira passagem ainda nao ha Pods
-      #    das APIs, entao o gate duro e o Service/Endpoints do gateway; quando
-      #    houver Pod de API, uma checagem de execucao e feita em best-effort.
+      - name: Validate existing New Relic Collector
+        if: ${{ steps.config.outputs.collector_validate_enabled == 'true' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./observability/scripts/install-newrelic-collector.ps1 `
+            -AwsRegion $env:AWS_REGION `
+            -RunId $env:GITHUB_RUN_ID `
+            -ReadOnly
+
       - name: Validate internal OTLP endpoint
-        if: ${{ steps.config.outputs.otlp_endpoint_validation_enabled == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -300,16 +276,15 @@ jobs:
             pod="$(k3s kubectl -n NAMESPACE_PLACEHOLDER get pods -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
           fi
           if [ -z "$pod" ]; then
-            echo "namespace NAMESPACE_PLACEHOLDER ainda sem Pods de API; Service/Endpoints do gateway validados."
-            echo 'OTLP_GATEWAY_READY=true'
-            exit 0
+            echo "namespace NAMESPACE_PLACEHOLDER ainda sem Pods de API. Execute os deploys das APIs antes do Observability Deploy." >&2
+            exit 1
           fi
 
           echo "pod de API encontrado para diagnostico best-effort: $pod"
           if k3s kubectl -n NAMESPACE_PLACEHOLDER exec "$pod" -- sh -c "command -v nc >/dev/null 2>&1 && nc -z -w 10 $alvo 4317" 2>/dev/null; then
             echo 'OTLP_REACHABLE_FROM_API_POD=true'
           else
-            echo 'Pod de API sem ferramenta TCP compativel; Service/Endpoints do gateway continuam sendo o gate duro.'
+            echo 'Pod de API sem ferramenta TCP compativel; Service/Endpoints do gateway continuam sendo a validacao obrigatoria.'
           fi
           echo 'OTLP_GATEWAY_READY=true'
           EOF
@@ -335,13 +310,8 @@ jobs:
             --region "$AWS_REGION" --query StandardErrorContent --output text >&2
           test "$status" = 'Success'
 
-      # 9 a 12. Dashboard, policy, condicoes, notificacao e Synthetic Monitors.
-      # A primeira passagem provisiona o que independe do Entrypoint. Na passagem
-      # final, mesmo com validation_only=true, a reconciliacao idempotente da New
-      # Relic fecha os Synthetics depois que a URL publica existe. As queries que
-      # dependem do gate 12 so sao persistidas depois da validacao passar.
       - name: Provision New Relic resources
-        if: ${{ steps.config.outputs.new_relic_provisioning_enabled == 'true' || (inputs.validation_only == true && inputs.application_signals_required == true && steps.config.outputs.new_relic_management_configured == 'true' && steps.platform.outputs.api_ready == 'true') }}
+        if: ${{ steps.config.outputs.new_relic_provisioning_enabled == 'true' }}
         shell: pwsh
         env:
           NEW_RELIC_USER_API_KEY: ${{ secrets.NEW_RELIC_USER_API_KEY }}
@@ -352,21 +322,14 @@ jobs:
             AccountId      = $env:NEW_RELIC_ACCOUNT_ID
             UserApiKey     = $env:NEW_RELIC_USER_API_KEY
             NewRelicRegion = $env:NEW_RELIC_REGION
+            ApiUrl         = $env:API_URL
           }
           if (-not [string]::IsNullOrWhiteSpace($env:NEW_RELIC_NOTIFICATION_EMAIL)) {
             $argumentos['NotificationEmail'] = $env:NEW_RELIC_NOTIFICATION_EMAIL
           }
-          if (-not [string]::IsNullOrWhiteSpace($env:API_URL)) {
-            $argumentos['ApiUrl'] = $env:API_URL
-          }
-          if ($env:APPLICATION_SIGNALS_REQUIRED -eq 'true' -and $env:VALIDATION_ONLY -ne 'true') {
-            $argumentos['ApplicationSignalsReady'] = $true
-          }
           ./observability/scripts/provision-newrelic.ps1 @argumentos
 
-      # 13 a 15. Requisicoes com correlationId conhecido e consulta com polling.
       - name: Validate telemetry in New Relic
-        if: ${{ steps.config.outputs.new_relic_validation_enabled == 'true' }}
         shell: pwsh
         env:
           NEW_RELIC_USER_API_KEY: ${{ secrets.NEW_RELIC_USER_API_KEY }}
@@ -380,61 +343,26 @@ jobs:
             UserApiKey     = $env:NEW_RELIC_USER_API_KEY
             NewRelicRegion = $env:NEW_RELIC_REGION
             CorrelationId  = $env:CORRELATION_ID
-          }
-          if (-not [string]::IsNullOrWhiteSpace($env:API_URL)) {
-            $argumentos['ApiUrl'] = $env:API_URL
-          }
-          if ($env:APPLICATION_SIGNALS_REQUIRED -eq 'true') {
-            $argumentos['ApplicationSignalsRequired'] = $true
+            ApiUrl         = $env:API_URL
+            RequireApiSignals = $true
           }
           if (-not [string]::IsNullOrWhiteSpace($env:NEW_RELIC_NOTIFICATION_EMAIL)) {
             $argumentos['NotificationEmail'] = $env:NEW_RELIC_NOTIFICATION_EMAIL
           }
           ./observability/scripts/validate-newrelic.ps1 @argumentos
 
-      - name: Consolidate New Relic resources after validation
-        if: ${{ inputs.validation_only == true && inputs.application_signals_required == true && steps.config.outputs.new_relic_management_configured == 'true' && steps.platform.outputs.api_ready == 'true' }}
-        shell: pwsh
-        env:
-          NEW_RELIC_USER_API_KEY: ${{ secrets.NEW_RELIC_USER_API_KEY }}
-          API_URL: ${{ steps.platform.outputs.api_url }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $argumentos = @{
-            AccountId               = $env:NEW_RELIC_ACCOUNT_ID
-            UserApiKey              = $env:NEW_RELIC_USER_API_KEY
-            NewRelicRegion          = $env:NEW_RELIC_REGION
-            ApiUrl                  = $env:API_URL
-            ApplicationSignalsReady = $true
-          }
-          if (-not [string]::IsNullOrWhiteSpace($env:NEW_RELIC_NOTIFICATION_EMAIL)) {
-            $argumentos['NotificationEmail'] = $env:NEW_RELIC_NOTIFICATION_EMAIL
-          }
-          ./observability/scripts/provision-newrelic.ps1 @argumentos
-
-      # Validacoes preservadas do Observability Validate anterior.
       - name: Validate edge log groups and ALB metrics
-        if: ${{ always() && steps.config.outputs.aws_configured == 'true' }}
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
-          api_ready='${{ steps.platform.outputs.api_ready }}'
-          if [ "$api_ready" = 'true' ]; then
-            aws logs describe-log-groups --log-group-name-prefix /aws/apigateway/oficina-api \
-              --region "$AWS_REGION" --query 'logGroups[0].logGroupName' --output text | grep -v '^None$'
-          else
-            echo 'API Gateway ainda nao publicada: log group /aws/apigateway/oficina-api fica pendente ate o Entrypoint Deploy.'
-            {
-              echo '## Validacao de borda'
-              echo ''
-              echo '- API Gateway ainda nao publicada: access log group pendente ate o Entrypoint Deploy.'
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+          aws logs describe-log-groups --log-group-name-prefix /aws/apigateway/oficina-api \
+            --region "$AWS_REGION" --query 'logGroups[0].logGroupName' --output text | grep -v '^None$'
           aws cloudwatch list-metrics --namespace AWS/ApplicationELB --metric-name HealthyHostCount \
             --region "$AWS_REGION" >/dev/null
 
       - name: Validate queue depth and dead-letter queues
-        if: ${{ always() && steps.config.outputs.aws_configured == 'true' }}
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
@@ -456,7 +384,7 @@ jobs:
           done
 
       - name: Validate cluster workloads
-        if: ${{ always() && steps.config.outputs.aws_configured == 'true' }}
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
@@ -469,7 +397,7 @@ jobs:
           export PATH="$PATH:/usr/local/bin"
           k3s kubectl -n NAMESPACE_PLACEHOLDER get pods -o wide
           k3s kubectl -n NAMESPACE_PLACEHOLDER get deployments
-          k3s kubectl -n newrelic get pods -o wide 2>/dev/null || echo 'namespace newrelic ausente'
+          k3s kubectl -n newrelic get pods -o wide
           k3s kubectl describe node | sed -n '/Conditions:/,/Addresses:/p'
           free -m
           df -h /
@@ -499,44 +427,15 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           test "$status" = 'Success'
 
-      - name: Publish next steps
+      - name: Publish summary
         if: always()
         shell: bash
         run: |
-          api_ready='${{ steps.platform.outputs.api_ready }}'
           {
-            echo '## Proximos passos'
+            echo '## Observability Deploy'
             echo ''
-            if [ "${AWS_CONFIGURED:-false}" != 'true' ]; then
-              echo '- AWS nao configurada: nenhum passo remoto de SSM, CloudWatch, SQS, EC2 ou cluster foi executado.'
-            fi
-            if [ "${NEW_RELIC_MANAGEMENT_CONFIGURED:-false}" != 'true' ]; then
-              echo '- New Relic nao configurado: nenhum recurso NerdGraph foi provisionado ou validado.'
-            elif [ "${NEW_RELIC_PROVISIONING_CONFIGURED:-false}" != 'true' ]; then
-              echo '- NEW_RELIC_LICENSE_KEY ausente: Collector e provisionamento real foram ignorados.'
-            fi
-            if [ "${AWS_CONFIGURED:-false}" != 'true' ] || [ "${NEW_RELIC_MANAGEMENT_CONFIGURED:-false}" != 'true' ]; then
-              echo ''
-              echo 'Somente as validacoes estaticas e o contrato do post-renderer foram executados.'
-              exit 0
-            fi
-            if [ "${VALIDATION_ONLY}" != 'true' ] && [ "${NEW_RELIC_PROVISIONING_CONFIGURED:-false}" != 'true' ]; then
-              echo ''
-              echo 'Nenhum Collector ou recurso New Relic foi provisionado nesta execucao.'
-              exit 0
-            fi
-
-            if [ "${APPLICATION_SIGNALS_REQUIRED}" != 'true' ]; then
-              if [ "$api_ready" = 'true' ]; then
-                echo '1. Reexecutar ou confirmar os deploys de Cadastro, Estoque e Ordens se os sinais ainda estiverem pendentes.'
-                echo '2. Reexecutar este workflow com `validation_only=true` e `application_signals_required=true`.'
-              else
-                echo '1. Continuar a sequencia: Cadastro, Initial Admin, Estoque, Ordens e Entrypoint.'
-                echo '2. Reexecutar este workflow com `validation_only=true` e `application_signals_required=true` depois do Entrypoint.'
-              fi
-              echo ''
-              echo 'Sinais das APIs e Synthetic Monitors ficam pendentes ate existirem Pods instrumentados e URL publica.'
-            else
-              echo 'Validacao com sinais obrigatorios executada. Se a reconciliacao final da New Relic falhou, reexecutar com `validation_only=false` e `application_signals_required=true` para consolidar manualmente.'
-            fi
+            echo "- Modo: ${OBSERVABILITY_MODE}"
+            echo "- API publica: resolvida via /oficina/infra/api/url"
+            echo "- Collector: validado em newrelic"
+            echo "- New Relic: provisionamento por upsert no modo DEPLOY; somente leitura no modo VALIDATE"
           } >> "$GITHUB_STEP_SUMMARY"

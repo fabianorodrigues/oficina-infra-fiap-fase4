@@ -16,7 +16,7 @@
       8. Criar o Secret Kubernetes versionado.
       9. Executar helm template com post-renderer.
      10. Executar helm upgrade --install.
-     11. Executar os gates pos-instalacao.
+     11. Executar as validacoes pos-instalacao.
 
     A license key nunca aparece no corpo do Run Command: ela vai para um
     SecureString em /oficina/deploy/newrelic/* e e lida dentro da EC2, que e o
@@ -27,7 +27,7 @@ param(
     [Parameter(Mandatory = $true)][string]$AwsRegion,
     [Parameter(Mandatory = $true)][string]$RunId,
     [string]$LicenseKey,
-    [switch]$ValidationOnly,
+    [switch]$ReadOnly,
     [string]$ConfigPath,
     [ValidateRange(60, 1800)][int]$StabilizationSeconds = 90
 )
@@ -48,8 +48,8 @@ $parameterName = "$($config.LicenseParameterPrefix)$RunId/license-key"
 $valuesPath = Join-Path $repositoryRoot 'observability/newrelic-values.yaml'
 $postRendererPath = Join-Path $PSScriptRoot 'post-render-newrelic.sh'
 
-if (-not $ValidationOnly -and [string]::IsNullOrWhiteSpace($LicenseKey)) {
-    throw 'LicenseKey e obrigatoria quando ValidationOnly nao esta ativo.'
+if (-not $ReadOnly -and [string]::IsNullOrWhiteSpace($LicenseKey)) {
+    throw 'LicenseKey e obrigatoria no caminho mutavel do Collector.'
 }
 
 # ---------------------------------------------------------------------------
@@ -64,21 +64,21 @@ Write-Host "  node $instanceId Online, namespace das APIs: $namespace"
 # ---------------------------------------------------------------------------
 # Passos 2 e 3. Helm, condicionado ao modo.
 #
-# Em ValidationOnly o script nao instala binario: baixar e substituir /usr/local/bin
+# Em ReadOnly o script nao instala binario: baixar e substituir /usr/local/bin
 # seria alteracao no node, e o modo de validacao e leitura pura.
 # ---------------------------------------------------------------------------
 Write-Step 'Passos 2 e 3: Helm no node'
-$helmScript = if ($ValidationOnly) {
+$helmScript = if ($ReadOnly) {
     @"
 set -eu
 export PATH="`$PATH:/usr/local/bin"
 if ! command -v helm >/dev/null 2>&1; then
-    echo 'Helm ausente. Execute antes com validation_only=false para instalar.' >&2
+    echo 'Helm ausente. Execute antes o Observability Deploy com mode=DEPLOY para instalar.' >&2
     exit 1
 fi
 instalada="`$(helm version --template '{{.Version}}')"
 if [ "`$instalada" != "v$($config.HelmVersion)" ]; then
-    echo "Helm divergente: encontrado `$instalada, esperado v$($config.HelmVersion). Execute antes com validation_only=false." >&2
+    echo "Helm divergente: encontrado `$instalada, esperado v$($config.HelmVersion). Execute antes o Observability Deploy com mode=DEPLOY." >&2
     exit 1
 fi
 echo "helm `$instalada"
@@ -178,13 +178,13 @@ if ($operation.Kind -eq 'unknown') {
     throw 'helm status nao pode ser interpretado. Erro de conexao, autenticacao ou cluster indisponivel nunca e tratado como release inexistente.'
 }
 
-if ($ValidationOnly) {
+if ($ReadOnly) {
     if ($operation.Kind -eq 'instalacao-inicial') {
-        throw 'Release inexistente em modo validation_only. Execute antes com validation_only=false.'
+        throw 'Release inexistente em modo VALIDATE. Execute antes o Observability Deploy com mode=DEPLOY.'
     }
 
-    Write-Step 'Modo validacao: renderizando com o customSecretName da revisao atual'
-    # Em validation_only nao existe Secret novo: o nome vem da revisao corrente e
+    Write-Step 'Modo VALIDATE: renderizando com o customSecretName da revisao atual'
+    # Em VALIDATE nao existe Secret novo: o nome vem da revisao corrente e
     # serve somente para a renderizacao local.
     $render = Invoke-NodeScript -InstanceId $instanceId -Region $AwsRegion -Comment 'Helm template' -Script @"
 set -eu
@@ -194,7 +194,7 @@ atual="`$(helm get values $($config.Release) --namespace $($config.Namespace) --
 echo "OFICINA_CURRENT_VALUES=`$atual"
 "@
     Write-Host $render
-    Write-Host 'Modo validacao concluido: nenhuma alteracao foi aplicada no cluster.'
+    Write-Host 'Modo VALIDATE concluido: nenhuma alteracao foi aplicada no cluster.'
     return
 }
 
@@ -205,30 +205,15 @@ $parameterCreated = $false
 $instalacaoConcluida = $false
 try {
     Write-Step 'Passo 7: SecureString temporario da license key'
-    $licenseDeliveryMode = 'parameter-store'
-    try {
-        Test-ObservabilityPermissions -Region $AwsRegion -InstanceId $instanceId -ParameterPrefix $config.LicenseParameterPrefix
-        New-LicenseParameter -Name $parameterName -Value $LicenseKey -Region $AwsRegion
-        $parameterCreated = $true
-    }
-    catch {
-        $licenseDeliveryMode = 'run-command-fallback'
-        Write-Host "  SecureString indisponivel: $($_.Exception.Message)"
-        Write-Host '  Usando fallback para ambiente restrito: a license key sera aplicada diretamente como Secret Kubernetes pelo Run Command.'
-    }
+    Test-ObservabilityPermissions -Region $AwsRegion -InstanceId $instanceId -ParameterPrefix $config.LicenseParameterPrefix
+    New-LicenseParameter -Name $parameterName -Value $LicenseKey -Region $AwsRegion
+    $parameterCreated = $true
 
     Write-Step "Passo 8: namespace e Secret versionado $secretName"
     # O nome do Secret carrega o run-id de proposito. Um Secret estavel sobrescrito
     # a cada execucao inviabiliza rollback: a revisao anterior do Helm passaria a
     # apontar para uma licenca que nao existe mais com aquele conteudo.
-    Write-Host "  modo de entrega da license key: $licenseDeliveryMode"
     Write-Host "::add-mask::$LicenseKey"
-    $licenseDataExpression = "`$(aws ssm get-parameter --name '$parameterName' --with-decryption --region '$AwsRegion' --query Parameter.Value --output text | tr -d '\n' | base64 -w0)"
-    if ($licenseDeliveryMode -eq 'run-command-fallback') {
-        $licenseKeyBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($LicenseKey))
-        Write-Host "::add-mask::$licenseKeyBase64"
-        $licenseDataExpression = "'$licenseKeyBase64'"
-    }
 
     Invoke-NodeScript -InstanceId $instanceId -Region $AwsRegion -Comment 'Secret da licenca' -Script @"
 set -eu
@@ -242,15 +227,14 @@ secret_file="`$(mktemp)"
 cleanup() { shred -u "`$secret_file" 2>/dev/null || rm -f "`$secret_file"; }
 trap cleanup EXIT
 
-license_data=$licenseDataExpression
+license_data="`$(aws ssm get-parameter --name '$parameterName' --with-decryption --region '$AwsRegion' --query Parameter.Value --output text | tr -d '\n' | base64 -w0)"
 if [ -z "`$license_data" ]; then
     echo 'license key vazia depois da resolucao.' >&2
     exit 1
 fi
 
 # printf e builtin e base64 le da entrada padrao: nenhum valor secreto aparece na
-# linha de comando de um processo. No fallback, license_data ja chega em base64
-# porque o runner nao tem permissao para criar SecureString temporario.
+# linha de comando de um processo.
 printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: %s\n  namespace: %s\n  labels:\n    app.kubernetes.io/name: $($config.LicenseSecretPrefix)\n    app.kubernetes.io/managed-by: fiap-fase4\n    oficina.run-id: "%s"\ntype: Opaque\ndata:\n  %s: %s\n' \
     '$secretName' '$($config.Namespace)' '$RunId' '$($config.LicenseSecretKey)' \
     "`$license_data" \
@@ -358,7 +342,7 @@ assert_gateway_recreate() {
 helm repo add $($config.ChartRepositoryName) $($config.ChartRepositoryUrl) --force-update >/dev/null
 helm repo update >/dev/null
 
-# O template do gate recebe exatamente as mesmas entradas do upgrade: com
+# O template de validacao recebe exatamente as mesmas entradas do upgrade: com
 # argumentos diferentes, o manifesto validado nao e o que o Helm aplicaria.
 helm template $($config.Release) $($config.ChartRepositoryName)/$($config.ChartName) \
     --version '$($config.ChartVersion)' \
@@ -414,10 +398,10 @@ helm status $($config.Release) --namespace $($config.Namespace) | head -5
         throw 'helm upgrade --install falhou. Diagnostico publicado no step summary.'
     }
 
-    Write-Step "Passo 11: gates pos-instalacao (estabilizacao de $StabilizationSeconds s)"
+    Write-Step "Passo 11: validacoes pos-instalacao (estabilizacao de $StabilizationSeconds s)"
     Start-Sleep -Seconds $StabilizationSeconds
 
-    $gate = Invoke-NodeScript -InstanceId $instanceId -Region $AwsRegion -Comment 'Gates' -Script @"
+    $postInstallValidation = Invoke-NodeScript -InstanceId $instanceId -Region $AwsRegion -Comment 'Validacoes pos-instalacao' -Script @"
 set -eu
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 export PATH="`$PATH:/usr/local/bin"
@@ -440,13 +424,13 @@ done
 k3s kubectl -n $($config.Namespace) get daemonset -o jsonpath='{range .items[*]}OFICINA_WORKLOAD daemonset/{.metadata.name} pronto={.status.numberReady} desejado={.status.desiredNumberScheduled}{"\n"}{end}'
 k3s kubectl -n $($config.Namespace) get deployment -o jsonpath='{range .items[*]}OFICINA_WORKLOAD deployment/{.metadata.name} pronto={.status.readyReplicas} desejado={.status.replicas}{"\n"}{end}'
 "@
-    Write-Host $gate
+    Write-Host $postInstallValidation
 
-    $violations = @(Test-CapacityGate -Text $gate -MinimumAvailableMi $config.MinimumAvailableMemoryMi)
+    $violations = @(Test-CapacityValidation -Text $postInstallValidation -MinimumAvailableMi $config.MinimumAvailableMemoryMi)
     if ($violations.Count -gt 0) {
-        # Fluxo B: o Helm terminou bem, mas os gates reprovaram. Aqui a reversao e
+        # Fluxo B: o Helm terminou bem, mas as validacoes reprovaram. Aqui a reversao e
         # deliberada, e a estrategia depende da classificacao do passo 6.
-        Write-Step 'Fluxo B: Helm concluiu, gates reprovaram. Revertendo'
+        Write-Step 'Fluxo B: Helm concluiu, validacoes reprovaram. Revertendo'
         $diagnostico = Get-CollectorDiagnostics -InstanceId $instanceId -Region $AwsRegion -Config $config -Namespace $namespace
         Write-Host $diagnostico
         Invoke-Revert -InstanceId $instanceId -Region $AwsRegion -Config $config -Operation $operation -ApiNamespace $namespace
@@ -460,11 +444,11 @@ k3s kubectl -n $($config.Namespace) get deployment -o jsonpath='{range .items[*]
             'Nao aumentar a EC2: a causa nao foi capacidade. Corrigir a causa reportada.'
         }
 
-        Write-Summary -Title 'Gates pos-instalacao reprovados' -Body (
+        Write-Summary -Title 'Validacoes pos-instalacao reprovadas' -Body (
             @('Operacao: ' + $operation.Kind, 'Reversao concluida.') +
             ($violations | ForEach-Object { "- $($_.Message)" }) +
             @($recommendation))
-        throw "Gates pos-instalacao reprovados: $(($violations | ForEach-Object { $_.Message }) -join '; ')"
+        throw "Validacoes pos-instalacao reprovadas: $(($violations | ForEach-Object { $_.Message }) -join '; ')"
     }
 
     Invoke-SecretCleanup -InstanceId $instanceId -Region $AwsRegion -Config $config -CurrentRunId $RunId
@@ -476,7 +460,7 @@ k3s kubectl -n $($config.Namespace) get deployment -o jsonpath='{range .items[*]
         "Secret da licenca: $secretName",
         "Gateway OTLP: $($config.GatewayService).$($config.Namespace).svc.cluster.local:$($config.OtlpGrpcPort)"
     )
-    Write-Host 'Collector instalado e gates aprovados.'
+    Write-Host 'Collector instalado e validacoes aprovadas.'
     $instalacaoConcluida = $true
 }
 finally {
