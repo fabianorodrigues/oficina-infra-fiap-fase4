@@ -25,6 +25,17 @@ resource "aws_vpc_security_group_egress_rule" "alb_to_node_ports" {
   tags = merge(local.common_tags, { Name = "${local.project_name}-alb-egress-nodeports" })
 }
 
+resource "aws_vpc_security_group_ingress_rule" "alb_from_k3s_node_http" {
+  security_group_id            = aws_security_group.alb.id
+  description                  = "HTTP from K3s node for internal service calls"
+  ip_protocol                  = "tcp"
+  from_port                    = 80
+  to_port                      = 80
+  referenced_security_group_id = aws_security_group.k3s_node.id
+
+  tags = merge(local.common_tags, { Name = "${local.project_name}-alb-ingress-k3s-http" })
+}
+
 # Unica origem de trafego para a faixa de NodePorts. A instancia fica em subnet
 # privada e sem IP publico, portanto os NodePorts nao sao alcancaveis de fora.
 resource "aws_vpc_security_group_ingress_rule" "node_ports_from_alb" {
