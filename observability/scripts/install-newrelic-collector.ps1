@@ -265,7 +265,7 @@ k3s kubectl -n $($config.Namespace) get secret $secretName -o name
     $previousRevisionCheck = if ($operation.Kind -eq 'atualizacao') {
         @"
 echo '--- manifesto da revisao que servira de rollback'
-if ! helm get manifest $($config.Release) --namespace $($config.Namespace) --revision $($operation.CurrentRevision) | grep -A2 'name: $($config.GatewayDeployment)' | grep -q 'Recreate' ; then
+if ! helm get manifest $($config.Release) --namespace $($config.Namespace) --revision $($operation.CurrentRevision) | assert_gateway_recreate - ; then
     echo 'AVISO: a revisao atual nao tem Recreate no gateway. O rollback restauraria RollingUpdate.' >&2
 fi
 "@
@@ -290,6 +290,68 @@ $postRendererContent
 OFICINA_RENDERER_EOF
 chmod 0755 "`$work/post-render.sh"
 
+assert_gateway_recreate() {
+    manifest_path="`$1"
+    awk -v name='$($config.GatewayDeployment)' '
+    function reset_doc() {
+        kind = ""
+        doc_name = ""
+        in_metadata = 0
+        in_strategy = 0
+        has_recreate = 0
+    }
+    function finish_doc() {
+        if (kind == "Deployment" && doc_name == name) {
+            found = 1
+            if (has_recreate) {
+                ok = 1
+            }
+        }
+        reset_doc()
+    }
+    BEGIN {
+        found = 0
+        ok = 0
+        reset_doc()
+    }
+    /^---[[:space:]]*$/ {
+        finish_doc()
+        next
+    }
+    /^kind:[[:space:]]/ {
+        kind = `$2
+        next
+    }
+    /^metadata:[[:space:]]*$/ {
+        in_metadata = 1
+        next
+    }
+    in_metadata && /^[^[:space:]]/ {
+        in_metadata = 0
+    }
+    in_metadata && /^  name:[[:space:]]/ {
+        doc_name = `$2
+        gsub(/"/, "", doc_name)
+        next
+    }
+    /^  strategy:[[:space:]]*$/ {
+        in_strategy = 1
+        next
+    }
+    in_strategy && /^    type:[[:space:]]*Recreate[[:space:]]*$/ {
+        has_recreate = 1
+        next
+    }
+    in_strategy && /^  [^[:space:]]/ {
+        in_strategy = 0
+    }
+    END {
+        finish_doc()
+        exit(found && ok ? 0 : 1)
+    }
+    ' "`$manifest_path"
+}
+
 helm repo add $($config.ChartRepositoryName) $($config.ChartRepositoryUrl) --force-update >/dev/null
 helm repo update >/dev/null
 
@@ -310,7 +372,7 @@ if grep -hoE 'image:[[:space:]]*\S+:latest' "`$work/rendered.yaml"; then
 fi
 
 echo '--- strategy no gateway'
-grep -A3 'name: $($config.GatewayDeployment)' "`$work/rendered.yaml" | grep -q 'Recreate' || {
+assert_gateway_recreate "`$work/rendered.yaml" || {
     echo 'Gateway sem strategy Recreate apos o post-renderer.' >&2
     exit 1
 }
