@@ -83,7 +83,16 @@ function Assert-NoMutationErrors {
     }
 
     if ($null -ne $Payload.PSObject.Properties['errors'] -and $null -ne $Payload.errors -and @($Payload.errors).Count -gt 0) {
-        $mensagens = @($Payload.errors | ForEach-Object { "$($_.type): $($_.description)" })
+        $mensagens = @($Payload.errors | ForEach-Object {
+                $typename = if ($null -ne $_.PSObject.Properties['__typename']) { $_.__typename } else { '' }
+                $type = if ($null -ne $_.PSObject.Properties['type']) { $_.type } else { '' }
+                $description = if ($null -ne $_.PSObject.Properties['description']) { $_.description } else { '' }
+                $message = if ($null -ne $_.PSObject.Properties['message']) { $_.message } else { '' }
+
+                $prefix = if (-not [string]::IsNullOrWhiteSpace($type)) { $type } elseif (-not [string]::IsNullOrWhiteSpace($typename)) { $typename } else { 'erro' }
+                $detail = if (-not [string]::IsNullOrWhiteSpace($description)) { $description } elseif (-not [string]::IsNullOrWhiteSpace($message)) { $message } else { ($_ | ConvertTo-Json -Compress) }
+                "${prefix}: $detail"
+            })
         throw "$Label falhou: $($mensagens -join ' | ')"
     }
 }
@@ -330,7 +339,7 @@ query($accountId: Int!) {
 mutation($accountId: Int!, $destination: AiNotificationsDestinationInput!) {
   aiNotificationsCreateDestination(accountId: $accountId, destination: $destination) {
     destination { id name }
-    errors { description type }
+    errors { __typename }
   }
 }
 '@ -Variables @{
@@ -347,7 +356,7 @@ mutation($accountId: Int!, $destination: AiNotificationsDestinationInput!) {
 mutation($accountId: Int!, $destinationId: ID!, $destination: AiNotificationsDestinationUpdate!) {
   aiNotificationsUpdateDestination(accountId: $accountId, destinationId: $destinationId, destination: $destination) {
     destination { id name }
-    errors { description type }
+    errors { __typename }
   }
 }
 '@ -Variables @{
@@ -382,7 +391,7 @@ query($accountId: Int!) {
 mutation($accountId: Int!, $channel: AiNotificationsChannelInput!) {
   aiNotificationsCreateChannel(accountId: $accountId, channel: $channel) {
     channel { id name }
-    errors { description type }
+    errors { __typename }
   }
 }
 '@ -Variables @{
@@ -435,7 +444,7 @@ query($accountId: Int!) {
 mutation($accountId: Int!, $workflow: AiWorkflowsCreateWorkflowInput!) {
   aiWorkflowsCreateWorkflow(accountId: $accountId, createWorkflowData: $workflow) {
     workflow { id name }
-    errors { description type }
+    errors { __typename }
   }
 }
 '@ -Variables @{
@@ -459,7 +468,7 @@ mutation($accountId: Int!, $workflow: AiWorkflowsCreateWorkflowInput!) {
 mutation($accountId: Int!, $id: ID!, $workflow: AiWorkflowsUpdateWorkflowInput!) {
   aiWorkflowsUpdateWorkflow(accountId: $accountId, id: $id, updateWorkflowData: $workflow) {
     workflow { id name }
-    errors { description type }
+    errors { __typename }
   }
 }
 '@ -Variables @{
