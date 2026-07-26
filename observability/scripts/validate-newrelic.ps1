@@ -3,8 +3,10 @@
     Valida os sinais de observabilidade no New Relic.
 
 .DESCRIPTION
-    Polling com timeout, sem sleep fixo longo: telemetria chega em janelas
-    variaveis, e um sleep unico ou reprova cedo demais ou desperdicia minutos.
+    Polling com timeout somente para sinais obrigatorios: telemetria chega em
+    janelas variaveis, e um sleep unico ou reprova cedo demais ou desperdicia
+    minutos. Sinais opcionais fazem uma consulta rapida e viram pendencia sem
+    esperar.
 
     Duas categorias de gate:
 
@@ -93,7 +95,9 @@ query($accountId: Int!, $nrql: Nrql!) {
 }
 
 <#
-Espera o sinal aparecer, reconsultando ate o timeout.
+Espera o sinal aparecer quando ele e obrigatorio. Sinal opcional nao pode segurar
+a primeira passagem do deploy: consulta uma vez e, se nao apareceu, registra
+pendencia.
 #>
 function Wait-ForSignal {
     param(
@@ -105,6 +109,24 @@ function Wait-ForSignal {
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $lastDetail = 'sem resultado'
+
+    if (-not $Required) {
+        try {
+            $rows = Invoke-Nrql -Query $Query
+            $verdict = & $Predicate $rows
+            if ($verdict.Ok) {
+                Add-Check -Name $Name -Status 'ok' -Detail $verdict.Detail
+                return $true
+            }
+            $lastDetail = $verdict.Detail
+        }
+        catch {
+            $lastDetail = $_.Exception.Message
+        }
+
+        Add-Check -Name $Name -Status 'pendente' -Detail "Aguardando redeploy das APIs instrumentadas. Ultima leitura: $lastDetail"
+        return $true
+    }
 
     while ((Get-Date) -lt $deadline) {
         try {
@@ -122,14 +144,8 @@ function Wait-ForSignal {
 
         Start-Sleep -Seconds $IntervalSeconds
     }
-
-    if ($Required) {
-        Add-Check -Name $Name -Status 'falha' -Detail $lastDetail
-        return $false
-    }
-
-    Add-Check -Name $Name -Status 'pendente' -Detail 'Aguardando redeploy das APIs instrumentadas.'
-    return $true
+    Add-Check -Name $Name -Status 'falha' -Detail $lastDetail
+    return $false
 }
 
 # ---------------------------------------------------------------------------

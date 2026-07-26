@@ -171,6 +171,10 @@ jobs:
           set -euo pipefail
           sh observability/scripts/test-helm-operation-shell.sh
 
+      - name: Test New Relic validation polling contract
+        shell: pwsh
+        run: ./observability/scripts/test-validate-newrelic-polling.ps1
+
       - name: Configure AWS credentials
         if: ${{ steps.config.outputs.aws_configured == 'true' }}
         uses: aws-actions/configure-aws-credentials@v5
