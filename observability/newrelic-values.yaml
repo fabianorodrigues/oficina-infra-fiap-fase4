@@ -29,12 +29,12 @@ images:
     repository: newrelic/nrdot-collector
     tag: 1.19.0
     pullPolicy: IfNotPresent
-  # O chart usa uma imagem auxiliar de kubectl com tag movel. Fixar e
-  # obrigatorio: sem isso o cluster troca de artefato sem nenhuma mudanca de
-  # codigo.
+  # O chart usa uma imagem auxiliar de kubectl. A tag acompanha a versao do K3s
+  # fixada em config/official.yml; bitnami/kubectl:1.31.4 deixou de existir no
+  # Docker Hub e quebra o init container do DaemonSet.
   kubectl:
-    repository: bitnami/kubectl
-    tag: 1.31.4
+    repository: rancher/kubectl
+    tag: v1.35.6
     pullPolicy: IfNotPresent
 
 receivers:

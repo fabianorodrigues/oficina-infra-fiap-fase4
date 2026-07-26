@@ -48,8 +48,8 @@ images:
     repository: newrelic/nrdot-collector
     tag: 1.19.0
   kubectl:
-    repository: bitnami/kubectl
-    tag: 1.31.4
+    repository: rancher/kubectl
+    tag: v1.35.6
   kubeStateMetrics:
     repository: registry.k8s.io/kube-state-metrics/kube-state-metrics
     tag: v2.14.0
