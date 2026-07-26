@@ -104,10 +104,14 @@ function Wait-ForSignal {
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][string]$Query,
         [Parameter(Mandatory = $true)][scriptblock]$Predicate,
-        [switch]$Required
+        [switch]$Required,
+        # Janela propria para sinal que depende de workload recem-criado. Zero
+        # mantem a janela padrao da execucao.
+        [ValidateRange(0, 900)][int]$TimeoutOverrideSeconds = 0
     )
 
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $janela = if ($TimeoutOverrideSeconds -gt 0) { $TimeoutOverrideSeconds } else { $TimeoutSeconds }
+    $deadline = (Get-Date).AddSeconds($janela)
     $lastDetail = 'sem resultado'
 
     if (-not $Required) {
@@ -187,28 +191,42 @@ WHERE metricName LIKE 'otelcol_%'
 $sinceClause
 "@ -Predicate {
     param($rows)
-    $count = if ($rows.Count -gt 0) { [int]($rows[0].PSObject.Properties | Where-Object { $_.Name -like '*uniqueCount*' } | Select-Object -First 1).Value } else { 0 }
+    $count = [int](Get-NrqlColumn -Row $(if ($rows.Count -gt 0) { $rows[0] } else { $null }) -Pattern '*uniqueCount*')
     [pscustomobject]@{ Ok = $count -gt 0; Detail = "$count instancia(s) do Collector" }
 } | Out-Null
 
-# Descoberta dos tipos K8s*Sample. Os nomes de atributo NAO sao contrato: eles vem
-# desta descoberta, e nenhuma query e versionada antes de confirmar.
+# Descoberta informativa dos tipos K8s*Sample. Os atributos encontrados vao para
+# o relatorio para que widget e alerta sejam conferidos contra o que a conta tem
+# de fato. Esta descoberta NAO reprova: o gate obrigatorio abaixo consulta
+# diretamente os atributos que o dashboard versiona, sem depender do formato do
+# retorno de keyset() -- inferir o gate desse formato ja reprovou execucao com
+# coleta saudavel.
 Write-Step 'Descoberta dos atributos de Kubernetes (gate 11)'
-$k8sDiscovery = @{}
 foreach ($sample in @('K8sNodeSample', 'K8sPodSample', 'K8sContainerSample')) {
     try {
         $rows = Invoke-Nrql -Query "FROM $sample SELECT keyset() SINCE 30 minutes ago"
         $keys = @()
         foreach ($row in $rows) {
             foreach ($prop in $row.PSObject.Properties) {
-                if ($prop.Value -is [System.Array]) { $keys += @($prop.Value) }
-                elseif ($null -ne $prop.Value) { $keys += [string]$prop.Value }
+                if ($prop.Value -is [string]) {
+                    $keys += $prop.Value
+                }
+                elseif ($prop.Value -is [System.Collections.IEnumerable]) {
+                    foreach ($item in $prop.Value) {
+                        if ($null -ne $item) { $keys += [string]$item }
+                    }
+                }
+                elseif ($null -ne $prop.Value) {
+                    $keys += [string]$prop.Value
+                }
             }
         }
         $keys = @($keys | Sort-Object -Unique)
-        $k8sDiscovery[$sample] = $keys
         if ($keys.Count -gt 0) {
-            Add-Check -Name "keyset() de $sample" -Status 'ok' -Detail "$($keys.Count) atributo(s)"
+            # A amostra e o que torna a descoberta diagnosticavel: sem ela, uma
+            # leitura errada aparece como um numero e nao ha como conferir.
+            $amostra = @($keys | Select-Object -First 8) -join ', '
+            Add-Check -Name "keyset() de $sample" -Status 'ok' -Detail "$($keys.Count) atributo(s): $amostra"
         }
         else {
             Add-Check -Name "keyset() de $sample" -Status 'pendente' -Detail 'Nenhum atributo no periodo: widget e alerta ficam pendentes de descoberta.'
@@ -219,21 +237,27 @@ foreach ($sample in @('K8sNodeSample', 'K8sPodSample', 'K8sContainerSample')) {
     }
 }
 
-# CPU e memoria sao obrigatorios na coleta; o gate NRQL depende dos nomes reais.
-$nodeKeys = if ($k8sDiscovery.ContainsKey('K8sNodeSample')) { $k8sDiscovery['K8sNodeSample'] } else { @() }
-if ($nodeKeys.Count -gt 0) {
-    $cpuKey = @($nodeKeys | Where-Object { $_ -match '(?i)cpu' }) | Select-Object -First 1
-    $memoryKey = @($nodeKeys | Where-Object { $_ -match '(?i)memory' }) | Select-Object -First 1
-    if ($cpuKey -and $memoryKey) {
-        Add-Check -Name 'CPU e memoria do node presentes' -Status 'ok' -Detail "cpu=$cpuKey memoria=$memoryKey"
+# Coleta de CPU e memoria do node e requisito, entao o gate consulta exatamente
+# os atributos que os widgets de Kubernetes renderizam: se estes contarem zero, o
+# dashboard tambem esta vazio. count() de atributo ausente devolve zero, nao erro.
+#
+# Por polling com janela propria: quem coleta metrica de node e o DaemonSet do
+# Collector, criado minutos antes nesta mesma execucao. Ja houve reprovacao com o
+# Pod ainda em PodInitializing -- a coleta estava correta, so nao tinha comecado.
+Wait-ForSignal -Name 'CPU e memoria do node presentes' -Required -TimeoutOverrideSeconds 600 -Query @"
+FROM K8sNodeSample SELECT count(cpuUsedCores) AS 'cpu', count(memoryWorkingSetUtilization) AS 'memoria'
+WHERE clusterName = '$($config.ClusterName)'
+SINCE 30 minutes ago
+"@ -Predicate {
+    param($rows)
+    $linha = if ($rows.Count -gt 0) { $rows[0] } else { $null }
+    $cpu = [double](Get-NrqlValue -Row $linha -Name 'cpu')
+    $memoria = [double](Get-NrqlValue -Row $linha -Name 'memoria')
+    [pscustomobject]@{
+        Ok     = $cpu -gt 0 -and $memoria -gt 0
+        Detail = "cpuUsedCores=$cpu memoryWorkingSetUtilization=$memoria"
     }
-    else {
-        Add-Check -Name 'CPU e memoria do node presentes' -Status 'falha' -Detail 'Coleta de CPU/memoria e obrigatoria e nenhum atributo correspondente foi encontrado.'
-    }
-}
-else {
-    Add-Check -Name 'CPU e memoria do node presentes' -Status 'pendente' -Detail 'Aguardando primeiro ciclo de coleta do Collector.'
-}
+} | Out-Null
 
 Write-Step 'Descoberta dos Kubernetes Events (gate 10)'
 $eventFound = $false
@@ -241,7 +265,7 @@ foreach ($eventType in @('InfrastructureEvent', 'K8sEventSample', 'Log')) {
     try {
         $filtro = if ($eventType -eq 'Log') { "WHERE k8s.namespace.name IS NOT NULL" } else { '' }
         $rows = Invoke-Nrql -Query "FROM $eventType SELECT count(*) $filtro SINCE 30 minutes ago"
-        $count = if ($rows.Count -gt 0) { [int]($rows[0].PSObject.Properties | Select-Object -First 1).Value } else { 0 }
+        $count = [int](Get-NrqlColumn -Row $(if ($rows.Count -gt 0) { $rows[0] } else { $null }) -Pattern '*count*')
         if ($count -gt 0) {
             Add-Check -Name "Kubernetes Events em $eventType" -Status 'ok' -Detail "$count registro(s)"
             $eventFound = $true
@@ -267,7 +291,7 @@ FACET service.name
 SINCE 10 minutes ago
 "@ -Predicate {
     param($rows)
-    $found = @($rows | ForEach-Object { $_.facet }) | Sort-Object -Unique
+    $found = @(@($rows | ForEach-Object { Get-NrqlValue -Row $_ -Name 'facet' } | Where-Object { $null -ne $_ }) | Sort-Object -Unique)
     $missing = @($services | Where-Object { $found -notcontains $_ })
     [pscustomobject]@{
         Ok     = $missing.Count -eq 0
@@ -277,28 +301,37 @@ SINCE 10 minutes ago
 
 # Gate 9: nao basta o log existir. Campo aninhado em body significa que o filelog
 # nao interpretou o JSON, e a correlacao com trace nao funciona.
+#
+# count(campo) conta ocorrencias nao nulas: campo que ficou aninhado em body
+# aparece como zero. A deteccao fica deterministica e nao depende do formato de
+# retorno de keyset(), que ja produziu leitura errada nesta validacao.
 Wait-ForSignal -Name 'Campos de log no nivel superior (gate 9)' -Required:$ApplicationSignalsRequired -Query @"
-FROM Log SELECT keyset()
+FROM Log SELECT count(service.name) AS 'servico', count(service.version) AS 'versao',
+count(deployment.environment) AS 'ambiente', count(correlationId) AS 'correlacao',
+count(trace.id) AS 'trace', count(span.id) AS 'span'
 WHERE correlationId = '$CorrelationId'
 SINCE 10 minutes ago
 "@ -Predicate {
     param($rows)
-    $keys = @()
-    foreach ($row in $rows) {
-        foreach ($prop in $row.PSObject.Properties) {
-            if ($prop.Value -is [System.Array]) { $keys += @($prop.Value) }
-            elseif ($null -ne $prop.Value) { $keys += [string]$prop.Value }
-        }
+    $colunas = [ordered]@{
+        'service.name'           = 'servico'
+        'service.version'        = 'versao'
+        'deployment.environment' = 'ambiente'
+        'correlationId'          = 'correlacao'
+        'trace.id'               = 'trace'
+        'span.id'                = 'span'
     }
-    $keys = @($keys | Sort-Object -Unique)
-    $required = @('service.name', 'service.version', 'deployment.environment', 'correlationId', 'trace.id', 'span.id')
-    $missing = @($required | Where-Object { $keys -notcontains $_ })
-    $nested = @($keys | Where-Object { $_ -like 'body.*' -or $_ -like 'message.*' })
+
+    $linha = if ($rows.Count -gt 0) { $rows[0] } else { $null }
+    $missing = @()
+    foreach ($campo in $colunas.Keys) {
+        if ([double](Get-NrqlValue -Row $linha -Name $colunas[$campo]) -le 0) { $missing += $campo }
+    }
+
     [pscustomobject]@{
         Ok     = $missing.Count -eq 0
         Detail = if ($missing.Count -eq 0) { 'todos os campos no nivel superior' }
-                 elseif ($nested.Count -gt 0) { "campos aninhados detectados ($($nested[0])): configurar parsing JSON no filelog. Faltam: $($missing -join ', ')" }
-                 else { "faltam: $($missing -join ', ')" }
+                 else { "faltam no nivel superior (campo aninhado em body indica filelog sem parsing JSON): $($missing -join ', ')" }
     }
 } | Out-Null
 
@@ -309,7 +342,7 @@ FACET service.name
 SINCE 10 minutes ago
 "@ -Predicate {
     param($rows)
-    $found = @($rows | ForEach-Object { $_.facet }) | Sort-Object -Unique
+    $found = @(@($rows | ForEach-Object { Get-NrqlValue -Row $_ -Name 'facet' } | Where-Object { $null -ne $_ }) | Sort-Object -Unique)
     [pscustomobject]@{ Ok = $found.Count -gt 0; Detail = "servicos: $($found -join ', ')" }
 } | Out-Null
 
@@ -339,7 +372,7 @@ if ($ApplicationSignalsRequired) {
     $httpShape = 'indefinida'
     try {
         $rows = Invoke-Nrql -Query "FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' SINCE 10 minutes ago"
-        $count = if ($rows.Count -gt 0) { [int]($rows[0].PSObject.Properties | Select-Object -First 1).Value } else { 0 }
+        $count = [int](Get-NrqlColumn -Row $(if ($rows.Count -gt 0) { $rows[0] } else { $null }) -Pattern '*count*')
         if ($count -gt 0) {
             $httpShape = 'Metric'
             Add-Check -Name 'Semantica HTTP por Metric' -Status 'ok' -Detail "metricName http.server.request.duration com $count amostra(s)"
@@ -350,7 +383,7 @@ if ($ApplicationSignalsRequired) {
     if ($httpShape -eq 'indefinida') {
         try {
             $rows = Invoke-Nrql -Query "FROM Span SELECT count(*) WHERE span.kind = 'server' SINCE 10 minutes ago"
-            $count = if ($rows.Count -gt 0) { [int]($rows[0].PSObject.Properties | Select-Object -First 1).Value } else { 0 }
+            $count = [int](Get-NrqlColumn -Row $(if ($rows.Count -gt 0) { $rows[0] } else { $null }) -Pattern '*count*')
             if ($count -gt 0) {
                 $httpShape = 'Span'
                 Add-Check -Name 'Semantica HTTP por Span (fallback)' -Status 'ok' -Detail "$count span(s) server. Alerta de 5xx deve usar Span."
@@ -431,8 +464,8 @@ $sinceClause
             continue
         }
 
-        $latest = [string](($rows[0].PSObject.Properties | Where-Object { $_.Name -like '*latest*' } | Select-Object -First 1).Value)
-        $distinct = [int](($rows[0].PSObject.Properties | Where-Object { $_.Name -like '*uniqueCount*' } | Select-Object -First 1).Value)
+        $latest = [string](Get-NrqlColumn -Row $rows[0] -Pattern '*latest*')
+        $distinct = [int](Get-NrqlColumn -Row $rows[0] -Pattern '*uniqueCount*')
 
         if ($distinct -gt 1) {
             Add-Check -Name "service.version de $service" -Status 'falha' -Detail "$distinct versoes ativas depois da estabilizacao do rollout."
@@ -598,7 +631,7 @@ foreach ($sinal in @(
         @{ Name = 'Spans de SQS'; Query = "FROM Span SELECT count(*) WHERE name IN ('oficina.outbox.dispatch', 'oficina.inbox.consume') SINCE 30 minutes ago" })) {
     try {
         $rows = Invoke-Nrql -Query $sinal.Query
-        $count = if ($rows.Count -gt 0) { [int]($rows[0].PSObject.Properties | Select-Object -First 1).Value } else { 0 }
+        $count = [int](Get-NrqlColumn -Row $(if ($rows.Count -gt 0) { $rows[0] } else { $null }) -Pattern '*count*')
         if ($count -gt 0) {
             Add-Check -Name $sinal.Name -Status 'ok' -Detail "$count registro(s)"
         }

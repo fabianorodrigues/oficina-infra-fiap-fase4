@@ -163,6 +163,43 @@ function Invoke-NodeScript {
     }
 }
 
+<#
+Leitura defensiva de coluna do NRQL.
+
+Sob StrictMode, ler propriedade inexistente e erro terminante: uma consulta com
+FACET que volta sem a coluna 'facet' derrubava o predicado, e o diagnostico virava
+"The property 'facet' cannot be found" no lugar do sinal que faltou.
+#>
+function Get-NrqlValue {
+    param(
+        $Row,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if ($null -eq $Row) { return $null }
+    $propriedade = $Row.PSObject.Properties[$Name]
+    if ($null -eq $propriedade) { return $null }
+    return $propriedade.Value
+}
+
+<#
+Primeira coluna cujo nome casa com o padrao.
+
+Funcao de agregacao sem alias vira coluna de nome derivado
+(uniqueCount.service.instance.id), que muda conforme o atributo agregado.
+#>
+function Get-NrqlColumn {
+    param(
+        $Row,
+        [Parameter(Mandatory = $true)][string]$Pattern
+    )
+
+    if ($null -eq $Row) { return $null }
+    $propriedade = @($Row.PSObject.Properties | Where-Object { $_.Name -like $Pattern }) | Select-Object -First 1
+    if ($null -eq $propriedade) { return $null }
+    return $propriedade.Value
+}
+
 function Read-ObservabilityConfig {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -620,7 +657,11 @@ exit "`$falhou"
 function Write-Summary {
     param(
         [Parameter(Mandatory = $true)][string]$Title,
-        [Parameter(Mandatory = $true)][string[]]$Body
+        # Corpo vazio e uso legitimo: a validacao publica o titulo e monta a
+        # tabela logo em seguida. Sem AllowEmptyCollection o binding reprova o
+        # passo no fim de uma execucao que ja tinha terminado o trabalho, com um
+        # erro que nao tem relacao nenhuma com o que foi validado.
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Body
     )
 
     $summaryPath = $env:GITHUB_STEP_SUMMARY
