@@ -39,7 +39,7 @@ if (-not (Test-Path -LiteralPath $ConfigPath)) {
 # para ler seis campos nao se justifica.
 function Get-YamlScalar {
     param(
-        [Parameter(Mandatory = $true)][string[]]$Lines,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string[]]$Lines,
         [Parameter(Mandatory = $true)][string]$Key
     )
 
@@ -52,7 +52,62 @@ function Get-YamlScalar {
     return $null
 }
 
+function Get-NestedImageValue {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string[]]$Lines,
+        [Parameter(Mandatory = $true)][string]$ImageName,
+        [Parameter(Mandatory = $true)][string]$Field
+    )
+
+    $inImages = $false
+    $inImage = $false
+    foreach ($line in $Lines) {
+        if ($line -match '^images:\s*$') {
+            $inImages = $true
+            $inImage = $false
+            continue
+        }
+        if ($inImages -and $line -match '^\S') { break }
+        if ($inImages -and $line -match "^\s{2}$([regex]::Escape($ImageName)):\s*$") {
+            $inImage = $true
+            continue
+        }
+        if ($inImage -and $line -match '^\s{2}\S') { $inImage = $false }
+        if ($inImage -and $line -match "^\s{4}$([regex]::Escape($Field)):\s*(.+?)\s*$") {
+            return $Matches[1].Trim().Trim('"').Trim("'")
+        }
+    }
+
+    return $null
+}
+
 $configLines = Get-Content -LiteralPath $ConfigPath
+$officialPath = Join-Path $RepositoryRoot 'config/official.yml'
+$expectedKubectlRepository = 'rancher/kubectl'
+$expectedKubectlTag = $null
+
+if (-not (Test-Path -LiteralPath $officialPath)) {
+    Add-Failure 'config/official.yml ausente. A tag do kubectl deve acompanhar kubernetes.k3sVersion.'
+}
+else {
+    $officialLines = Get-Content -LiteralPath $officialPath
+    $k3sVersion = Get-YamlScalar -Lines $officialLines -Key 'k3sVersion'
+    if ($k3sVersion -match '^(?<tag>v\d+\.\d+\.\d+)\+k3s\d+$') {
+        $expectedKubectlTag = $Matches['tag']
+    }
+    else {
+        Add-Failure "config/official.yml kubernetes.k3sVersion fora do formato vX.Y.Z+k3sN: $k3sVersion"
+    }
+}
+
+$configKubectlRepository = Get-NestedImageValue -Lines $configLines -ImageName 'kubectl' -Field 'repository'
+$configKubectlTag = Get-NestedImageValue -Lines $configLines -ImageName 'kubectl' -Field 'tag'
+if ($configKubectlRepository -ne $expectedKubectlRepository) {
+    Add-Failure "config/observability.yml images.kubectl.repository deve ser $expectedKubectlRepository (atual: $configKubectlRepository)."
+}
+if ($null -ne $expectedKubectlTag -and $configKubectlTag -ne $expectedKubectlTag) {
+    Add-Failure "config/observability.yml images.kubectl.tag deve acompanhar config/official.yml sem o sufixo +k3sN: $expectedKubectlTag (atual: $configKubectlTag)."
+}
 
 # A chave `version` aparece em dois blocos (helm e chart), portanto a leitura e
 # feita por bloco: um Get-YamlScalar achatado devolveria a primeira ocorrencia e
@@ -134,31 +189,6 @@ else {
     $valuesLines = Get-Content -LiteralPath $valuesPath
     $valuesRaw = $valuesLines -join "`n"
 
-    function Get-ImageTag {
-        param([Parameter(Mandatory = $true)][string]$ImageName)
-
-        $inImages = $false
-        $inImage = $false
-        foreach ($line in $valuesLines) {
-            if ($line -match '^images:\s*$') {
-                $inImages = $true
-                $inImage = $false
-                continue
-            }
-            if ($inImages -and $line -match '^\S') { break }
-            if ($inImages -and $line -match "^\s{2}$([regex]::Escape($ImageName)):\s*$") {
-                $inImage = $true
-                continue
-            }
-            if ($inImage -and $line -match '^\s{2}\S') { $inImage = $false }
-            if ($inImage -and $line -match '^\s{4}tag:\s*(.+?)\s*$') {
-                return $Matches[1].Trim().Trim('"').Trim("'")
-            }
-        }
-
-        return $null
-    }
-
     if ($valuesLines | Select-String -Pattern '^\s*licenseKey\s*:' -Quiet) {
         Add-Failure 'newrelic-values.yaml declara licenseKey. O arquivo e versionado e nao pode conter secret.'
     }
@@ -189,8 +219,13 @@ else {
     if ($valuesRaw -notmatch '(?m)^images:\s*$') {
         Add-Failure 'newrelic-values.yaml nao declara images:. collector/kubectl precisam ser fixados nas chaves suportadas pelo chart.'
     }
-    if ((Get-ImageTag -ImageName 'collector') -ne '1.19.0') { Add-Failure 'newrelic-values.yaml nao fixa images.collector.tag=1.19.0.' }
-    if ((Get-ImageTag -ImageName 'kubectl') -ne '1.31.4') { Add-Failure 'newrelic-values.yaml nao fixa images.kubectl.tag=1.31.4.' }
+    if ((Get-NestedImageValue -Lines $valuesLines -ImageName 'collector' -Field 'tag') -ne '1.19.0') { Add-Failure 'newrelic-values.yaml nao fixa images.collector.tag=1.19.0.' }
+    if ((Get-NestedImageValue -Lines $valuesLines -ImageName 'kubectl' -Field 'repository') -ne $expectedKubectlRepository) {
+        Add-Failure "newrelic-values.yaml nao fixa images.kubectl.repository=$expectedKubectlRepository."
+    }
+    if ($null -ne $expectedKubectlTag -and (Get-NestedImageValue -Lines $valuesLines -ImageName 'kubectl' -Field 'tag') -ne $expectedKubectlTag) {
+        Add-Failure "newrelic-values.yaml nao fixa images.kubectl.tag=$expectedKubectlTag."
+    }
     if ($valuesRaw -notmatch 'updateStrategy:\s*Recreate') {
         Add-Failure 'newrelic-values.yaml nao define kube-state-metrics.updateStrategy=Recreate. O KSM vem do values, nao do post-renderer.'
     }
