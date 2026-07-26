@@ -199,13 +199,28 @@ Valida o ALB da plataforma (interno, listener HTTP, *target groups*) e as Lambda
 
 **Actions → Observability Deploy → Run workflow**
 
-Fora da sequência numerada, executável após a etapa 8. Instala o Collector da New Relic no K3s, provisiona dashboard, alertas, notificação por e-mail e os três Synthetic Monitors, e valida os sinais que chegaram. Preserva as validações somente leitura que existiam antes: log group do API Gateway, métricas do ALB no CloudWatch, profundidade das filas e das DLQs e, por Systems Manager, o estado dos Pods, dos Deployments e da capacidade do node.
+Fora da sequência numerada, executável após a etapa 8. Quando AWS e New Relic
+estão configurados, instala o Collector da New Relic no K3s, provisiona
+dashboard, alertas e os três Synthetic Monitors, e valida os sinais que chegaram.
+Quando a configuração está ausente, o workflow vira no-op remoto: roda apenas as
+validações estáticas e o contrato do post-renderer, sem criar Secret, sem aplicar
+Helm e sem chamar NerdGraph/NRQL.
+
+Configuração opcional da New Relic:
+
+| Nome | Tipo | Uso | Obrigatório |
+|---|---|---|:---:|
+| `NEW_RELIC_ACCOUNT_ID` | Variable | Conta usada por NerdGraph/NRQL | Só para provisionar ou validar New Relic |
+| `NEW_RELIC_USER_API_KEY` | Secret | Chave de usuário para NerdGraph | Só para provisionar ou validar New Relic |
+| `NEW_RELIC_LICENSE_KEY` | Secret | License key entregue somente ao Collector | Só para instalar Collector/provisionar |
+| `NEW_RELIC_REGION` | Variable | `US` ou `EU`; default `US` quando vazia | Não |
+| `NEW_RELIC_NOTIFICATION_EMAIL` | Variable | Destination/channel/workflow de alerta por e-mail | Não |
 
 Dois modos, pelos inputs:
 
 | Input | `false` | `true` |
 |---|---|---|
-| `validation_only` | instala Helm, aplica o chart, cria Secret e provisiona no New Relic. Exige `confirmation=DEPLOY` | somente leitura: nenhum binário instalado, nenhum manifesto aplicado, nenhum recurso alterado |
+| `validation_only` | instala Helm, aplica o chart, cria Secret e provisiona no New Relic quando a configuração estiver completa. Exige `confirmation=DEPLOY` apenas nesse caso | somente leitura: nenhum binário instalado, nenhum manifesto aplicado, nenhum recurso alterado |
 | `application_signals_required` | sinais das APIs ficam registrados como pendentes | exige logs, spans, métricas HTTP e `service.version` dos três serviços |
 
 **Ordem de execução em três passagens.** Na primeira, os Pods das APIs ainda rodam a versão anterior à instrumentação, sem `OTEL_EXPORTER_OTLP_ENDPOINT` nem o formatter novo — exigir os sinais das APIs ali reprovaria o workflow mesmo com o Collector instalado corretamente:

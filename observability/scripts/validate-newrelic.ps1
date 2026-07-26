@@ -23,10 +23,10 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$AwsRegion,
-    [Parameter(Mandatory = $true)][string]$AccountId,
-    [Parameter(Mandatory = $true)][string]$UserApiKey,
-    [Parameter(Mandatory = $true)][string]$CorrelationId,
+    [string]$AwsRegion,
+    [string]$AccountId,
+    [string]$UserApiKey,
+    [string]$CorrelationId,
     [ValidateSet('US', 'EU')][string]$NewRelicRegion = 'US',
     [string]$ApiUrl,
     [switch]$ApplicationSignalsRequired,
@@ -45,6 +45,19 @@ if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
 
 . (Join-Path $PSScriptRoot 'newrelic-common.ps1')
 . (Join-Path $PSScriptRoot 'nerdgraph-client.ps1')
+
+if ([string]::IsNullOrWhiteSpace($AccountId) -or [string]::IsNullOrWhiteSpace($UserApiKey)) {
+    Write-Summary -Title 'Validacao New Relic ignorada' -Body @(
+        'NEW_RELIC_ACCOUNT_ID ou NEW_RELIC_USER_API_KEY nao configurado.',
+        'Nenhuma consulta NerdGraph ou NRQL foi executada.'
+    )
+    Write-Host 'New Relic nao configurado: validacao remota ignorada.'
+    return
+}
+
+if ([string]::IsNullOrWhiteSpace($CorrelationId)) {
+    $CorrelationId = "observability-validation-$([Guid]::NewGuid().ToString('N'))"
+}
 
 $config = Read-ObservabilityConfig -Path $ConfigPath
 $context = New-NerdGraphContext -AccountId $AccountId -ApiKey $UserApiKey -Region $NewRelicRegion

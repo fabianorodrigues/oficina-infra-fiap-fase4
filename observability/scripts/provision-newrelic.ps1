@@ -22,8 +22,8 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$AccountId,
-    [Parameter(Mandatory = $true)][string]$UserApiKey,
+    [string]$AccountId,
+    [string]$UserApiKey,
     [ValidateSet('US', 'EU')][string]$NewRelicRegion = 'US',
     [string]$NotificationEmail,
     [string]$ApiUrl,
@@ -41,6 +41,15 @@ if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
 
 . (Join-Path $PSScriptRoot 'newrelic-common.ps1')
 . (Join-Path $PSScriptRoot 'nerdgraph-client.ps1')
+
+if ([string]::IsNullOrWhiteSpace($AccountId) -or [string]::IsNullOrWhiteSpace($UserApiKey)) {
+    Write-Summary -Title 'Provisionamento New Relic ignorado' -Body @(
+        'NEW_RELIC_ACCOUNT_ID ou NEW_RELIC_USER_API_KEY nao configurado.',
+        'Nenhum dashboard, policy, monitor, destination, channel ou workflow foi criado ou atualizado.'
+    )
+    Write-Host 'New Relic nao configurado: provisionamento ignorado.'
+    return
+}
 
 $config = Read-ObservabilityConfig -Path $ConfigPath
 $context = New-NerdGraphContext -AccountId $AccountId -ApiKey $UserApiKey -Region $NewRelicRegion
