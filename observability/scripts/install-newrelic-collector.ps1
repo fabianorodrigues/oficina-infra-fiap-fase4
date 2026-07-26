@@ -202,6 +202,7 @@ echo "OFICINA_CURRENT_VALUES=`$atual"
 # Passos 7 a 11. Caminho que altera o cluster.
 # ---------------------------------------------------------------------------
 $parameterCreated = $false
+$instalacaoConcluida = $false
 try {
     Write-Step 'Passo 7: SecureString temporario da license key'
     $licenseDeliveryMode = 'parameter-store'
@@ -468,10 +469,22 @@ k3s kubectl -n $($config.Namespace) get pods -o jsonpath='{range .items[*]}{.met
         "Gateway OTLP: $($config.GatewayService).$($config.Namespace).svc.cluster.local:$($config.OtlpGrpcPort)"
     )
     Write-Host 'Collector instalado e gates aprovados.'
+    $instalacaoConcluida = $true
 }
 finally {
     if ($parameterCreated) {
         Write-Step 'Removendo o SecureString temporario'
-        Remove-LicenseParameter -Name $parameterName -Region $AwsRegion
+        try {
+            Remove-LicenseParameter -Name $parameterName -Region $AwsRegion
+        }
+        catch {
+            # Falha de limpeza nunca substitui a excecao original: sem isto o
+            # operador leria "SecureString ainda existe" no lugar da causa real da
+            # reprovacao. Se a instalacao concluiu, esta e a unica falha e precisa
+            # reprovar -- SecureString com license key nao pode sobreviver ao job.
+            Write-Host "  FALHA ao remover o SecureString $parameterName : $($_.Exception.Message)"
+            Write-Host "  Remover manualmente: aws ssm delete-parameter --name $parameterName --region $AwsRegion"
+            if ($instalacaoConcluida) { throw }
+        }
     }
 }

@@ -29,6 +29,52 @@ function New-NerdGraphContext {
     }
 }
 
+<#
+Status HTTP da falha, quando existir.
+
+Falha de transporte (DNS, TLS, timeout) nao tem status: e a ausencia dele que
+distingue "nao chegou ao servidor" de "o servidor recusou".
+#>
+function Get-HttpStatusCode {
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception) {
+        $response = $exception.PSObject.Properties['Response']
+        if ($null -ne $response -and $null -ne $response.Value) {
+            $status = $response.Value.PSObject.Properties['StatusCode']
+            if ($null -ne $status -and $null -ne $status.Value) {
+                try { return [int]$status.Value } catch { }
+            }
+        }
+        $exception = $exception.InnerException
+    }
+
+    return $null
+}
+
+<#
+So erro transitorio justifica nova tentativa: 401, 403 e 404 nao mudam de
+resposta em cinco segundos, e insistir neles troca diagnostico imediato por
+espera inutil.
+#>
+function Test-RetryableFailure {
+    param($StatusCode)
+
+    if ($null -eq $StatusCode) { return $true }
+    if ($StatusCode -in @(408, 429)) { return $true }
+    return $StatusCode -ge 500
+}
+
+<#
+Mutation nao e reexecutada as cegas.
+
+Um timeout de resposta pode ter chegado ao servidor: repetir criaria o segundo
+dashboard, policy ou workflow, e a resolucao por nome da execucao seguinte
+acusaria duplicidade que so sai com limpeza manual. Perder a execucao por um
+erro transitorio custa um reexecutar; duplicar recurso custa intervencao no New
+Relic. Query e leitura pura e continua sendo reexecutada.
+#>
 function Invoke-NerdGraph {
     param(
         [Parameter(Mandatory = $true)]$Context,
@@ -36,6 +82,10 @@ function Invoke-NerdGraph {
         [hashtable]$Variables,
         [ValidateRange(1, 10)][int]$MaxAttempts = 3
     )
+
+    if ($Query -match '(?m)^\s*mutation\b' -and -not $PSBoundParameters.ContainsKey('MaxAttempts')) {
+        $MaxAttempts = 1
+    }
 
     $body = @{ query = $Query }
     if ($null -ne $Variables) { $body['variables'] = $Variables }
@@ -53,8 +103,11 @@ function Invoke-NerdGraph {
                 -TimeoutSec 60
         }
         catch {
-            if ($attempt -ge $MaxAttempts) {
-                throw "NerdGraph inacessivel apos $attempt tentativa(s): $($_.Exception.Message)"
+            $status = Get-HttpStatusCode -ErrorRecord $_
+            $descricao = if ($null -eq $status) { $_.Exception.Message } else { "HTTP ${status}: $($_.Exception.Message)" }
+
+            if ($attempt -ge $MaxAttempts -or -not (Test-RetryableFailure -StatusCode $status)) {
+                throw "NerdGraph inacessivel apos $attempt tentativa(s): $descricao"
             }
             Start-Sleep -Seconds (5 * $attempt)
             continue
@@ -220,13 +273,13 @@ query($accountId: Int!, $name: String!) {
 }
 '@ -Variables @{ accountId = [int]$Context.AccountId; name = $Name }
 
-    $matches = @($response.data.actor.account.alerts.nrqlConditionsSearch.nrqlConditions |
+    $encontradas = @($response.data.actor.account.alerts.nrqlConditionsSearch.nrqlConditions |
         Where-Object { $_.name -eq $Name -and [string]$_.policyId -eq [string]$PolicyId })
 
-    if ($matches.Count -eq 0) { return $null }
-    if ($matches.Count -eq 1) { return $matches[0] }
+    if ($encontradas.Count -eq 0) { return $null }
+    if ($encontradas.Count -eq 1) { return $encontradas[0] }
 
-    $ids = ($matches | ForEach-Object { $_.id }) -join ', '
+    $ids = ($encontradas | ForEach-Object { $_.id }) -join ', '
     throw "Condicao '$Name' duplicada na policy $PolicyId. IDs: $ids. Remover a duplicidade antes de reexecutar."
 }
 
@@ -292,7 +345,7 @@ query($accountId: Int!, $policyId: ID!) {
     }
   } } }
 }
-'@ -Variables @{ accountId = [int]$Context.AccountId; policyId = $PolicyId } -MaxAttempts 1
+'@ -Variables @{ accountId = [int]$Context.AccountId; policyId = $PolicyId }
 
     $conditions = @($response.data.actor.account.alerts.syntheticsMultiLocationConditionsSearch.conditions |
         Where-Object { $_.name -eq $Name })
@@ -302,6 +355,47 @@ query($accountId: Int!, $policyId: ID!) {
 
     $ids = ($conditions | ForEach-Object { $_.id }) -join ', '
     throw "Condicao de Synthetic '$Name' duplicada na policy $PolicyId. IDs: $ids."
+}
+
+<#
+Percorre todas as paginas de uma listagem NerdGraph.
+
+destinations, channels e workflows nao aceitam busca por nome nesta consulta:
+devolvem a conta inteira, paginada. Parar na primeira pagina e falha silenciosa
+de idempotencia -- com o recurso existente fora dela, a resolucao por nome
+concluiria "nao existe" e criaria o segundo destination, channel ou workflow,
+que a execucao seguinte acusaria como duplicidade.
+#>
+function Get-AllPages {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$Query,
+        [Parameter(Mandatory = $true)][hashtable]$Variables,
+        [Parameter(Mandatory = $true)][scriptblock]$SelectPage,
+        [ValidateRange(1, 200)][int]$MaxPages = 50
+    )
+
+    $entidades = @()
+    $cursor = $null
+    $pagina = 0
+
+    do {
+        $pagina++
+        if ($pagina -gt $MaxPages) {
+            throw "Listagem NerdGraph passou de $MaxPages paginas: o cursor nao esta avancando."
+        }
+
+        $variaveis = @{} + $Variables
+        $variaveis['cursor'] = $cursor
+
+        $resposta = Invoke-NerdGraph -Context $Context -Query $Query -Variables $variaveis
+        $bloco = & $SelectPage $resposta
+
+        $entidades += @($bloco.entities)
+        $cursor = if ($null -ne $bloco.PSObject.Properties['nextCursor']) { [string]$bloco.nextCursor } else { '' }
+    } while (-not [string]::IsNullOrWhiteSpace($cursor))
+
+    return $entidades
 }
 
 <#
@@ -318,16 +412,15 @@ function Set-NotificationChain {
         [Parameter(Mandatory = $true)][string]$PolicyId
     )
 
-    $destinations = Invoke-NerdGraph -Context $Context -Query @'
-query($accountId: Int!) {
+    $destinations = Get-AllPages -Context $Context -Variables @{ accountId = [int]$Context.AccountId } -Query @'
+query($accountId: Int!, $cursor: String) {
   actor { account(id: $accountId) { aiNotifications {
-    destinations { entities { id name type } }
+    destinations(cursor: $cursor) { nextCursor entities { id name type } }
   } } }
 }
-'@ -Variables @{ accountId = [int]$Context.AccountId }
+'@ -SelectPage { param($resposta) $resposta.data.actor.account.aiNotifications.destinations }
 
-    $existingDestinations = @($destinations.data.actor.account.aiNotifications.destinations.entities |
-        Where-Object { $_.name -eq $Name })
+    $existingDestinations = @($destinations | Where-Object { $_.name -eq $Name })
     if ($existingDestinations.Count -gt 1) {
         throw "Destination '$Name' duplicado. IDs: $(($existingDestinations | ForEach-Object { $_.id }) -join ', ')."
     }
@@ -368,16 +461,15 @@ mutation($accountId: Int!, $destinationId: ID!, $destination: AiNotificationsDes
         $destinationAction = 'updated'
     }
 
-    $channels = Invoke-NerdGraph -Context $Context -Query @'
-query($accountId: Int!) {
+    $channels = Get-AllPages -Context $Context -Variables @{ accountId = [int]$Context.AccountId } -Query @'
+query($accountId: Int!, $cursor: String) {
   actor { account(id: $accountId) { aiNotifications {
-    channels { entities { id name destinationId } }
+    channels(cursor: $cursor) { nextCursor entities { id name destinationId } }
   } } }
 }
-'@ -Variables @{ accountId = [int]$Context.AccountId }
+'@ -SelectPage { param($resposta) $resposta.data.actor.account.aiNotifications.channels }
 
-    $existingChannels = @($channels.data.actor.account.aiNotifications.channels.entities |
-        Where-Object { $_.name -eq $Name })
+    $existingChannels = @($channels | Where-Object { $_.name -eq $Name })
     if ($existingChannels.Count -gt 1) {
         throw "Channel '$Name' duplicado. IDs: $(($existingChannels | ForEach-Object { $_.id }) -join ', ')."
     }
@@ -413,16 +505,18 @@ mutation($accountId: Int!, $channel: AiNotificationsChannelInput!) {
         $channelAction = 'updated'
     }
 
-    $workflows = Invoke-NerdGraph -Context $Context -Query @'
-query($accountId: Int!) {
+    $workflows = Get-AllPages -Context $Context -Variables @{ accountId = [int]$Context.AccountId } -Query @'
+query($accountId: Int!, $cursor: String) {
   actor { account(id: $accountId) { aiWorkflows {
-    workflows { entities { id name } }
+    workflows(cursor: $cursor) {
+      nextCursor
+      entities { id name issuesFilter { id predicates { attribute values } } }
+    }
   } } }
 }
-'@ -Variables @{ accountId = [int]$Context.AccountId }
+'@ -SelectPage { param($resposta) $resposta.data.actor.account.aiWorkflows.workflows }
 
-    $existingWorkflows = @($workflows.data.actor.account.aiWorkflows.workflows.entities |
-        Where-Object { $_.name -eq $Name })
+    $existingWorkflows = @($workflows | Where-Object { $_.name -eq $Name })
     if ($existingWorkflows.Count -gt 1) {
         throw "Workflow '$Name' duplicado. IDs: $(($existingWorkflows | ForEach-Object { $_.id }) -join ', ')."
     }
@@ -464,16 +558,37 @@ mutation($accountId: Int!, $workflow: AiWorkflowsCreateWorkflowInput!) {
     }
     else {
         $workflowId = $existingWorkflows[0].id
+
+        # O update nao reescreve o issuesFilter, entao um workflow que deixou de
+        # apontar para esta policy (policy recriada com outro id, filtro editado
+        # na UI) continuaria existindo sem notificar nada. Reportar 'updated'
+        # sobre uma cadeia que nao entrega e-mail e pior que reprovar aqui.
+        $predicados = @()
+        if ($null -ne $existingWorkflows[0].PSObject.Properties['issuesFilter'] -and $null -ne $existingWorkflows[0].issuesFilter) {
+            $predicados = @($existingWorkflows[0].issuesFilter.predicates)
+        }
+
+        $filtraPolicy = $false
+        foreach ($predicado in $predicados) {
+            if (@($predicado.values) -contains [string]$PolicyId) { $filtraPolicy = $true }
+        }
+
+        if (-not $filtraPolicy) {
+            throw "Workflow '$Name' ($workflowId) existe mas nao filtra a policy ${PolicyId}: o incidente nao viraria e-mail. Corrigir o filtro no New Relic ou remover o workflow para que a proxima execucao o recrie amarrado a policy."
+        }
+
+        # Diferente das demais mutations de update, aiWorkflowsUpdateWorkflow nao
+        # aceita `id` como argumento: o id do workflow vai dentro de
+        # updateWorkflowData. Passar no topo quebra a validacao de schema.
         $updated = Invoke-NerdGraph -Context $Context -Query @'
-mutation($accountId: Int!, $id: ID!, $workflow: AiWorkflowsUpdateWorkflowInput!) {
-  aiWorkflowsUpdateWorkflow(accountId: $accountId, id: $id, updateWorkflowData: $workflow) {
+mutation($accountId: Int!, $workflow: AiWorkflowsUpdateWorkflowInput!) {
+  aiWorkflowsUpdateWorkflow(accountId: $accountId, updateWorkflowData: $workflow) {
     workflow { id name }
     errors { __typename }
   }
 }
 '@ -Variables @{
             accountId = [int]$Context.AccountId
-            id        = $workflowId
             workflow  = @{
                 id                    = $workflowId
                 name                  = $Name

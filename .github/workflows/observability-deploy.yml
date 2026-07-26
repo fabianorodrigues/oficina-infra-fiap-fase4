@@ -69,6 +69,10 @@ jobs:
           AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
           NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
           NEW_RELIC_USER_API_KEY: ${{ secrets.NEW_RELIC_USER_API_KEY }}
+          # Entrada livre do dispatch chega por env, nunca interpolada no corpo do
+          # script: a expressao e expandida antes de o shell existir, e uma aspa
+          # no valor deixaria de ser dado para virar codigo.
+          CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           $ErrorActionPreference = 'Stop'
           $validationOnly = $env:VALIDATION_ONLY -eq 'true'
@@ -111,7 +115,7 @@ jobs:
             if ($env:GITHUB_REF -ne 'refs/heads/main') {
               throw "Deploy so a partir de refs/heads/main (atual: $env:GITHUB_REF)."
             }
-            if ('${{ inputs.confirmation }}' -cne 'DEPLOY') {
+            if ($env:CONFIRMATION -cne 'DEPLOY') {
               throw 'Confirmacao invalida. Digite DEPLOY para executar o caminho que altera recursos.'
             }
           }
@@ -341,6 +345,7 @@ jobs:
         shell: pwsh
         env:
           NEW_RELIC_USER_API_KEY: ${{ secrets.NEW_RELIC_USER_API_KEY }}
+          API_URL: ${{ steps.platform.outputs.api_url }}
         run: |
           $ErrorActionPreference = 'Stop'
           $argumentos = @{
@@ -351,9 +356,8 @@ jobs:
           if (-not [string]::IsNullOrWhiteSpace($env:NEW_RELIC_NOTIFICATION_EMAIL)) {
             $argumentos['NotificationEmail'] = $env:NEW_RELIC_NOTIFICATION_EMAIL
           }
-          $apiUrl = '${{ steps.platform.outputs.api_url }}'
-          if (-not [string]::IsNullOrWhiteSpace($apiUrl)) {
-            $argumentos['ApiUrl'] = $apiUrl
+          if (-not [string]::IsNullOrWhiteSpace($env:API_URL)) {
+            $argumentos['ApiUrl'] = $env:API_URL
           }
           if ($env:APPLICATION_SIGNALS_REQUIRED -eq 'true' -and $env:VALIDATION_ONLY -ne 'true') {
             $argumentos['ApplicationSignalsReady'] = $true
@@ -366,6 +370,8 @@ jobs:
         shell: pwsh
         env:
           NEW_RELIC_USER_API_KEY: ${{ secrets.NEW_RELIC_USER_API_KEY }}
+          API_URL: ${{ steps.platform.outputs.api_url }}
+          CORRELATION_ID: ${{ steps.platform.outputs.correlation_id }}
         run: |
           $ErrorActionPreference = 'Stop'
           $argumentos = @{
@@ -373,11 +379,10 @@ jobs:
             AccountId      = $env:NEW_RELIC_ACCOUNT_ID
             UserApiKey     = $env:NEW_RELIC_USER_API_KEY
             NewRelicRegion = $env:NEW_RELIC_REGION
-            CorrelationId  = '${{ steps.platform.outputs.correlation_id }}'
+            CorrelationId  = $env:CORRELATION_ID
           }
-          $apiUrl = '${{ steps.platform.outputs.api_url }}'
-          if (-not [string]::IsNullOrWhiteSpace($apiUrl)) {
-            $argumentos['ApiUrl'] = $apiUrl
+          if (-not [string]::IsNullOrWhiteSpace($env:API_URL)) {
+            $argumentos['ApiUrl'] = $env:API_URL
           }
           if ($env:APPLICATION_SIGNALS_REQUIRED -eq 'true') {
             $argumentos['ApplicationSignalsRequired'] = $true
@@ -392,13 +397,14 @@ jobs:
         shell: pwsh
         env:
           NEW_RELIC_USER_API_KEY: ${{ secrets.NEW_RELIC_USER_API_KEY }}
+          API_URL: ${{ steps.platform.outputs.api_url }}
         run: |
           $ErrorActionPreference = 'Stop'
           $argumentos = @{
             AccountId               = $env:NEW_RELIC_ACCOUNT_ID
             UserApiKey              = $env:NEW_RELIC_USER_API_KEY
             NewRelicRegion          = $env:NEW_RELIC_REGION
-            ApiUrl                  = '${{ steps.platform.outputs.api_url }}'
+            ApiUrl                  = $env:API_URL
             ApplicationSignalsReady = $true
           }
           if (-not [string]::IsNullOrWhiteSpace($env:NEW_RELIC_NOTIFICATION_EMAIL)) {

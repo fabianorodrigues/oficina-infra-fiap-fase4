@@ -14,21 +14,44 @@ function Write-Step {
     Write-Host "==> $Message"
 }
 
+<#
+stdout e stderr sao capturados separados.
+
+Com 2>&1 qualquer aviso do AWS CLI entra no valor lido por --query: o instance-id
+voltaria como "<aviso>\ni-0abc" e o erro so apareceria depois, longe da causa.
+#>
 function Invoke-Aws {
     param(
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [switch]$AllowFailure
     )
 
-    $output = & aws @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
+    # Atribuicao local, nao vaza para o chamador. Windows PowerShell converte
+    # stderr redirecionado de executavel nativo em erro terminante quando o
+    # preference e Stop, mesmo com o comando terminando em exit 0.
+    $ErrorActionPreference = 'Continue'
+
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    try {
+        $output = & aws @Arguments 2>$stderrPath
+        $exitCode = $LASTEXITCODE
+        $stderr = Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue
+    }
+    finally {
+        Remove-Item -LiteralPath $stderrPath -ErrorAction SilentlyContinue
+    }
+
+    if ($null -eq $stderr) { $stderr = '' }
+    $stderr = $stderr.Trim()
+
     if ($exitCode -ne 0 -and -not $AllowFailure) {
-        throw "AWS CLI falhou (exit $exitCode): aws $($Arguments -join ' ')`n$($output | Out-String)"
+        throw "AWS CLI falhou (exit $exitCode): aws $($Arguments -join ' ')`n$(($output | Out-String).Trim())`n$stderr"
     }
 
     return [pscustomobject]@{
         ExitCode = $exitCode
         Output   = ($output | Out-String).Trim()
+        Error    = $stderr
     }
 }
 
