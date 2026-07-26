@@ -1,0 +1,405 @@
+{
+  "_comment": [
+    "Dashboard provisionado por observability/scripts/provision-newrelic.ps1.",
+    "__ACCOUNT_ID__ e substituido em runtime.",
+    "Widgets exigem SELECT e FROM; SINCE e opcional de proposito, para que o",
+    "time picker global do dashboard funcione. Janela fixa so onde o widget",
+    "precisa dela.",
+    "Widgets marcados com requiresGate dependem de descoberta remota e sao",
+    "adicionados pelo script somente depois que a query correspondente for",
+    "validada e versionada. Nenhuma query ficticia entra aqui."
+  ],
+  "name": "FIAP Oficina - Visao Geral",
+  "description": "Telemetria da solucao FIAP Fase 4. managedBy=fiap-fase4 solution=oficina environment=production",
+  "permissions": "PUBLIC_READ_WRITE",
+  "pages": [
+    {
+      "name": "Negocio",
+      "description": "Metricas do meter Oficina.OrdensServico. Sinais best-effort: o banco e os SagaSnapshots sao a fonte oficial dos estados.",
+      "widgets": [
+        {
+          "title": "Volume diario de ordens criadas",
+          "layout": { "column": 1, "row": 1, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Metric SELECT sum(oficina.os.created) TIMESERIES 1 day"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Transicoes de OS por status",
+          "_comment": "Nao pode ser lido como 'ordens atuais por status': o contador mede transicoes, nao o estoque atual de ordens.",
+          "layout": { "column": 5, "row": 1, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.bar" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Metric SELECT sum(oficina.os.status.transitions) FACET to_status"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Transicoes por par de estados",
+          "layout": { "column": 9, "row": 1, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Metric SELECT sum(oficina.os.status.transitions) FACET from_status, to_status, result"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Tempo medio por status (s)",
+          "layout": { "column": 1, "row": 4, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.bar" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Metric SELECT average(oficina.os.status.duration) FACET status"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Sagas concluidas e compensadas",
+          "layout": { "column": 5, "row": 4, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Metric SELECT sum(oficina.os.status.transitions) WHERE to_status IN ('Concluida', 'Compensada', 'CompensacaoFalhou') FACET to_status TIMESERIES"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Falhas de processamento por etapa",
+          "layout": { "column": 9, "row": 4, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Metric SELECT sum(oficina.os.processing.failures) FACET stage, reason"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Falhas por integracao",
+          "layout": { "column": 1, "row": 7, "width": 6, "height": 3 },
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Metric SELECT sum(oficina.integration.failures) FACET integration, operation"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Falhas de integracao no tempo",
+          "layout": { "column": 7, "row": 7, "width": 6, "height": 3 },
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Metric SELECT sum(oficina.integration.failures) FACET integration TIMESERIES"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "APIs",
+      "description": "Requests, latencia e erros dos tres servicos. Nomes de metrica e atributo confirmados pelo gate 12.",
+      "widgets": [
+        {
+          "title": "Requests por servico",
+          "layout": { "column": 1, "row": 1, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' FACET service.name TIMESERIES",
+                "requiresGate": 12
+              }
+            ]
+          }
+        },
+        {
+          "title": "Latencia media por servico (s)",
+          "layout": { "column": 5, "row": 1, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Metric SELECT average(http.server.request.duration) FACET service.name TIMESERIES",
+                "requiresGate": 12
+              }
+            ]
+          }
+        },
+        {
+          "title": "Percentis de latencia",
+          "layout": { "column": 9, "row": 1, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Metric SELECT percentile(http.server.request.duration, 50, 95, 99) FACET service.name",
+                "requiresGate": 12
+              }
+            ]
+          }
+        },
+        {
+          "title": "Erros 4xx por servico",
+          "layout": { "column": 1, "row": 4, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' AND http.response.status_code >= 400 AND http.response.status_code < 500 FACET service.name TIMESERIES",
+                "requiresGate": 12
+              }
+            ]
+          }
+        },
+        {
+          "title": "Erros 5xx por servico",
+          "layout": { "column": 5, "row": 4, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' AND http.response.status_code >= 500 FACET service.name TIMESERIES",
+                "requiresGate": 12
+              }
+            ]
+          }
+        },
+        {
+          "title": "Excecoes por servico",
+          "layout": { "column": 9, "row": 4, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Log SELECT count(*) WHERE level = 'ERROR' FACET service.name, exception.type"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Endpoints mais lentos",
+          "layout": { "column": 1, "row": 7, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Span SELECT average(duration.ms) WHERE span.kind = 'server' FACET name LIMIT 20",
+                "requiresGate": 12
+              }
+            ]
+          }
+        },
+        {
+          "title": "Dependencias HTTP de saida",
+          "layout": { "column": 5, "row": 7, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Span SELECT count(*), average(duration.ms) WHERE span.kind = 'client' AND http.request.method IS NOT NULL FACET service.name, server.address",
+                "requiresGate": 12
+              }
+            ]
+          }
+        },
+        {
+          "title": "Duracao de operacoes SQL",
+          "_comment": "Nao existe meter de EF Core: a duracao vem dos spans do SqlClient.",
+          "layout": { "column": 9, "row": 7, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Span SELECT count(*), average(duration.ms), percentile(duration.ms, 95) WHERE db.system IS NOT NULL FACET service.name"
+              }
+            ]
+          }
+        },
+        {
+          "title": "Fluxo distribuido Ordens e Estoque",
+          "_comment": "Atributos emitidos pela instrumentacao AWS, confirmados no gate 8.",
+          "layout": { "column": 1, "row": 10, "width": 12, "height": 3 },
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Span SELECT count(*) WHERE name IN ('oficina.outbox.dispatch', 'oficina.inbox.consume') FACET service.name, name, oficina.saga.current_state"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Kubernetes",
+      "description": "Sinais do cluster oficina-k3s. Event types e atributos confirmados pelo gate 11; Kubernetes Events pelo gate 10.",
+      "widgets": [
+        {
+          "title": "CPU do node",
+          "layout": { "column": 1, "row": 1, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM K8sNodeSample SELECT average(cpuUsedCores) WHERE clusterName = 'oficina-k3s' FACET nodeName TIMESERIES",
+                "requiresGate": 11
+              }
+            ]
+          }
+        },
+        {
+          "title": "Memoria do node",
+          "layout": { "column": 5, "row": 1, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM K8sNodeSample SELECT average(memoryWorkingSetUtilization) WHERE clusterName = 'oficina-k3s' FACET nodeName TIMESERIES",
+                "requiresGate": 11
+              }
+            ]
+          }
+        },
+        {
+          "title": "Collector ativo",
+          "_comment": "Depende de collectorObservability.enabled=true no values.yaml.",
+          "layout": { "column": 9, "row": 1, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.billboard" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM Metric SELECT uniqueCount(service.instance.id) WHERE metricName LIKE 'otelcol_%' SINCE 10 minutes ago"
+              }
+            ]
+          }
+        },
+        {
+          "title": "CPU por Pod",
+          "layout": { "column": 1, "row": 4, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM K8sPodSample SELECT average(cpuUsedCores) WHERE clusterName = 'oficina-k3s' FACET podName TIMESERIES",
+                "requiresGate": 11
+              }
+            ]
+          }
+        },
+        {
+          "title": "Memoria por Pod",
+          "layout": { "column": 5, "row": 4, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM K8sPodSample SELECT average(memoryWorkingSetBytes) WHERE clusterName = 'oficina-k3s' FACET podName TIMESERIES",
+                "requiresGate": 11
+              }
+            ]
+          }
+        },
+        {
+          "title": "Reinicios de containers",
+          "layout": { "column": 9, "row": 4, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM K8sContainerSample SELECT latest(restartCount) WHERE clusterName = 'oficina-k3s' FACET podName, containerName",
+                "requiresGate": 11
+              }
+            ]
+          }
+        },
+        {
+          "title": "Pods nao prontos",
+          "layout": { "column": 1, "row": 7, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM K8sPodSample SELECT latest(status) WHERE clusterName = 'oficina-k3s' AND status != 'Running' FACET podName",
+                "requiresGate": 11
+              }
+            ]
+          }
+        },
+        {
+          "title": "Pressao de memoria e disco",
+          "layout": { "column": 5, "row": 7, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM K8sNodeSample SELECT latest(condition.MemoryPressure), latest(condition.DiskPressure), latest(condition.Ready) WHERE clusterName = 'oficina-k3s' FACET nodeName",
+                "requiresGate": 11
+              }
+            ]
+          }
+        },
+        {
+          "title": "Kubernetes Events",
+          "layout": { "column": 9, "row": 7, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountId": "__ACCOUNT_ID__",
+                "query": "FROM InfrastructureEvent SELECT count(*) WHERE clusterName = 'oficina-k3s' FACET event.reason, event.message",
+                "requiresGate": 10
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

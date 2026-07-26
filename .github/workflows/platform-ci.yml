@@ -6,11 +6,13 @@ on:
     paths:
       - config/**
       - k8s/**
+      - observability/**
       - terraform/**
       - scripts/**
       - .github/workflows/platform-ci.yml
       - .github/workflows/platform-deploy.yml
       - .github/workflows/entrypoint-deploy.yml
+      - .github/workflows/observability-deploy.yml
   workflow_dispatch:
 
 permissions:
@@ -32,21 +34,39 @@ jobs:
         run: |
           set -euo pipefail
           jq empty config/entrypoint.json
+          for f in observability/dashboards/*.json observability/alerts/*.json observability/synthetics/*.json; do
+            jq empty "$f"
+          done
       - name: Validate YAML
         run: |
           set -euo pipefail
-          for f in config/official.yml config/resource-contract.yml config/solution.yml k8s/*.yaml; do
+          for f in config/official.yml config/observability.yml config/resource-contract.yml config/solution.yml \
+                   k8s/*.yaml observability/newrelic-values.yaml; do
             python3 -c "import sys, yaml; yaml.safe_load(open(sys.argv[1]))" "$f"
           done
       - name: Validate PowerShell syntax
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Get-ChildItem -Path scripts -Filter *.ps1 -File | ForEach-Object {
+          Get-ChildItem -Path scripts, observability/scripts -Filter *.ps1 -File | ForEach-Object {
             $tokens = $null; $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error "$($_.Extent.File): $($_.Message)" }; exit 1 }
           }
+      - name: Validate observability config
+        shell: pwsh
+        run: ./scripts/validate-observability-config.ps1
+      - name: Lint shell scripts
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --shell=sh observability/scripts/post-render-newrelic.sh observability/scripts/test-post-render.sh
+      - name: Test post-renderer contract
+        run: |
+          set -euo pipefail
+          # O post-renderer altera manifesto que sera aplicado no cluster: um erro
+          # aqui corromperia o release em silencio.
+          sh observability/scripts/test-post-render.sh
       - name: Resolve K3s version
         run: |
           set -euo pipefail

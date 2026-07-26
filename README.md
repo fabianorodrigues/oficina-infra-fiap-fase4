@@ -195,11 +195,26 @@ Execute **apenas depois** das etapas 4 a 7.
 
 Valida o ALB da plataforma (interno, listener HTTP, *target groups*) e as Lambdas de autenticação (com alias `live`) → valida o plano → aplica a API Gateway, o VPC Link e as integrações → aguarda o VPC Link ficar `AVAILABLE` → executa validação somente leitura e teste de fumaça na API. Se falhar por destino não saudável, a causa quase sempre está em um dos serviços das etapas 5 a 7.
 
-### Observability Validate — opcional
+### Observability Deploy
 
-**Actions → Observability Validate → Run workflow**
+**Actions → Observability Deploy → Run workflow**
 
-Fora da sequência numerada. Não exige confirmação e é **somente leitura**: verifica o log group do API Gateway, as métricas do ALB no CloudWatch, a profundidade das filas e das DLQs e, por Systems Manager, o estado dos Pods, dos Deployments e da capacidade do node. Pode ser executado a qualquer momento após a etapa 8.
+Fora da sequência numerada, executável após a etapa 8. Instala o Collector da New Relic no K3s, provisiona dashboard, alertas, notificação por e-mail e os três Synthetic Monitors, e valida os sinais que chegaram. Preserva as validações somente leitura que existiam antes: log group do API Gateway, métricas do ALB no CloudWatch, profundidade das filas e das DLQs e, por Systems Manager, o estado dos Pods, dos Deployments e da capacidade do node.
+
+Dois modos, pelos inputs:
+
+| Input | `false` | `true` |
+|---|---|---|
+| `validation_only` | instala Helm, aplica o chart, cria Secret e provisiona no New Relic. Exige `confirmation=DEPLOY` | somente leitura: nenhum binário instalado, nenhum manifesto aplicado, nenhum recurso alterado |
+| `application_signals_required` | sinais das APIs ficam registrados como pendentes | exige logs, spans, métricas HTTP e `service.version` dos três serviços |
+
+**Ordem de execução em três passagens.** Na primeira, os Pods das APIs ainda rodam a versão anterior à instrumentação, sem `OTEL_EXPORTER_OTLP_ENDPOINT` nem o formatter novo — exigir os sinais das APIs ali reprovaria o workflow mesmo com o Collector instalado corretamente:
+
+1. `validation_only=false`, `application_signals_required=false` — instala o Collector, provisiona o que já é validável, valida cluster e Collector.
+2. Redeploy de Cadastro, Estoque e Ordens, nessa ordem.
+3. `validation_only=true`, `application_signals_required=true` — valida logs, spans, métricas HTTP e a comparação tripla de `service.version`.
+
+Uma quarta passagem de consolidação (`validation_only=false`, `application_signals_required=true`) existe apenas quando a passagem 3 descobriu query que ainda precisa ser persistida no dashboard ou nos alertas.
 
 ---
 
@@ -255,18 +270,28 @@ done
 
 ## Observabilidade
 
-O que está efetivamente ativo hoje:
-
 | Sinal | Onde |
 |---|---|
-| Logs dos workloads | `k3s kubectl logs` na EC2, por Systems Manager; sem agente de logs no cluster |
+| Logs estruturados das APIs | JSON no stdout dos containers → receiver `filelog` do Collector → New Relic |
+| Métricas técnicas e de negócio | OTLP gRPC das APIs → `nr-otel-gateway.newrelic.svc.cluster.local:4317` → New Relic |
+| Traces distribuídos | OTLP gRPC, propagação W3C por HTTP e por SQS |
+| Sinais do K3s | `kubeletstats`, `hostmetrics`, `k8s_events` e kube-state-metrics, pelo Collector |
+| Dashboard, alertas e uptime | `FIAP Oficina - Visão Geral`, policy `FIAP Oficina - Produção` e três Synthetic Ping Monitors |
+| Logs dos workloads no cluster | `k3s kubectl logs` na EC2, por Systems Manager |
 | Log de acesso da API | Grupo `/aws/apigateway/oficina-api`, retenção de 14 dias, sem dados sensíveis |
 | Capacidade do node | `free -m`, `df -h` e `crictl stats`, validados após cada deploy |
 | Métricas de plataforma | `AWS/ApplicationELB` no CloudWatch |
-| Rastreamento distribuído | X-Ray nas Lambdas de autenticação |
+| Rastreamento das Lambdas | X-Ray nas Lambdas de autenticação |
+
+Um único Collector no cluster: o **New Relic Distribution of OpenTelemetry Collector**, pelo chart `nr-k8s-otel-collector` em versão fixa. Não há `nri-bundle`, Fluent Bit, segundo Collector nem agente paralelo.
+
+> [!IMPORTANT]
+> A license key vive somente no Collector. As APIs recebem apenas o endereço interno do gateway OTLP — nenhum Pod de aplicação recebe `NEW_RELIC_LICENSE_KEY`, `NEW_RELIC_USER_API_KEY` ou `OTEL_EXPORTER_OTLP_HEADERS`, e `scripts/validate-official-config.ps1` de cada serviço reprova o deploy se isso mudar.
 
 > [!NOTE]
-> **Não há painéis, alarmes, tópicos de notificação nem coletor OpenTelemetry.** A observabilidade em vigor é a descrita acima. Use o **Observability Validate** (opcional) para conferir automaticamente que cluster, grupos de log e métricas estão presentes.
+> Telemetria é **fail-open**: falha do Collector ou da New Relic registra erro local e a aplicação continua servindo. Nada em telemetria pode impedir inicialização, requisição, consumo de mensagem, execução da saga ou health check.
+
+Detalhes, queries do dashboard, alertas e troubleshooting em `docs/OBSERVABILITY.md`.
 
 ---
 
@@ -310,4 +335,4 @@ Pré-condição: cluster `ACTIVE`, ALB interno e os 4 repositórios ECR criados.
 Pré-condição: API Gateway aplicada, VPC Link `AVAILABLE`, os três destinos saudáveis no ALB e etapa 5.1 concluída no primeiro provisionamento do ambiente.
 **→ [oficina-ordens-servico](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4)** — seção [Como executar → Etapa 9](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4#etapa-9--collection-postman-execução-manual), a validação funcional pela collection Postman que encerra a sequência.
 
-**Opcional, a qualquer momento após a etapa 8:** [Observability Validate](#observability-validate--opcional), neste mesmo repositório.
+**Após a etapa 8:** [Observability Deploy](#observability-deploy), neste mesmo repositório. São três passagens, com redeploy dos três serviços entre a primeira e a terceira.

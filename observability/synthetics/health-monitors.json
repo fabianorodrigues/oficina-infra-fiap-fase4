@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "Synthetic Ping Monitors provisionados por observability/scripts/provision-newrelic.ps1.",
+    "__API_URL__ e substituido em runtime pelo valor de /oficina/infra/api/url.",
+    "Os tres endpoints ja existem, sao authorizationType NONE no API Gateway e",
+    "retornam 200. /ready NAO e exposto publicamente e nao pode virar monitor:",
+    "scripts/smoke-test-api.ps1 exige que ele continue 404.",
+    "Periodo de 5 minutos: a conta gratuita tem franquia limitada de verificacoes.",
+    "Criar o monitor nao notifica nada por si so. Cada um tem condicao propria em",
+    "alerts/oficina-alerts.json, associada a policy."
+  ],
+  "period": "EVERY_5_MINUTES",
+  "status": "ENABLED",
+  "locations": {
+    "public": ["AWS_US_EAST_1"]
+  },
+  "tags": [
+    { "key": "managedBy", "values": ["fiap-fase4"] },
+    { "key": "solution", "values": ["oficina"] },
+    { "key": "environment", "values": ["production"] }
+  ],
+  "monitors": [
+    {
+      "name": "Oficina Cadastro - Health",
+      "uri": "__API_URL__/health/cadastro",
+      "service": "oficina-cadastro",
+      "conditionName": "Oficina Cadastro - Health Failure"
+    },
+    {
+      "name": "Oficina Estoque - Health",
+      "uri": "__API_URL__/health/estoque",
+      "service": "oficina-estoque",
+      "conditionName": "Oficina Estoque - Health Failure"
+    },
+    {
+      "name": "Oficina Ordens - Health",
+      "uri": "__API_URL__/health/ordens",
+      "service": "oficina-ordens-servico",
+      "conditionName": "Oficina Ordens - Health Failure"
+    }
+  ]
+}
