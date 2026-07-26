@@ -183,32 +183,88 @@ jobs:
         id: node
         run: |
           set -euo pipefail
-          instance=$(aws ssm get-parameter --name /oficina/infra/k8s/instance-id --region "$AWS_REGION" --query Parameter.Value --output text)
+
+          fail_node_wait() {
+            echo "NODE_WAIT_FAILED=1" >> "$GITHUB_ENV"
+            echo "$1" >&2
+            exit 1
+          }
+
+          get_instance_state() {
+            aws ec2 describe-instances \
+              --instance-ids "$instance" \
+              --region "$AWS_REGION" \
+              --query 'Reservations[0].Instances[0].State.Name' --output text
+          }
+
+          instance=$(aws ssm get-parameter --name /oficina/infra/k8s/instance-id --region "$AWS_REGION" --query Parameter.Value --output text) \
+            || fail_node_wait "Could not read /oficina/infra/k8s/instance-id from Parameter Store."
           echo "instance_id=$instance" >> "$GITHUB_OUTPUT"
-          aws ec2 wait instance-running --instance-ids "$instance" --region "$AWS_REGION"
+
+          state=$(get_instance_state) \
+            || fail_node_wait "Could not describe K3s instance $instance."
+          echo "EC2_STATE_BEFORE_WAIT=$state" >> "$GITHUB_ENV"
+          echo "K3s instance $instance current EC2 state: $state"
+
+          case "$state" in
+            running|pending)
+              ;;
+            stopping)
+              echo "K3s instance is stopping; waiting for it to stop before starting it again."
+              aws ec2 wait instance-stopped --instance-ids "$instance" --region "$AWS_REGION" \
+                || fail_node_wait "K3s instance did not reach stopped state in time."
+              echo "K3s instance stopped; starting it again."
+              aws ec2 start-instances --instance-ids "$instance" --region "$AWS_REGION" >/dev/null \
+                || fail_node_wait "Could not start K3s instance $instance."
+              ;;
+            stopped)
+              echo "K3s instance is stopped; starting it before SSM validation."
+              aws ec2 start-instances --instance-ids "$instance" --region "$AWS_REGION" >/dev/null \
+                || fail_node_wait "Could not start K3s instance $instance."
+              ;;
+            shutting-down|terminated)
+              fail_node_wait "K3s instance $instance is $state. The SSM parameter or Terraform state is stale; rerun Platform Deploy after state reconciliation."
+              ;;
+            *)
+              fail_node_wait "Unexpected EC2 state for K3s instance $instance: $state."
+              ;;
+          esac
+
+          aws ec2 wait instance-running --instance-ids "$instance" --region "$AWS_REGION" \
+            || fail_node_wait "K3s instance $instance did not reach running state in time."
 
           online=0
+          last_status=None
           for _ in $(seq 1 60); do
-            status=$(aws ssm describe-instance-information \
+            last_status=$(aws ssm describe-instance-information \
               --filters "Key=InstanceIds,Values=$instance" \
               --region "$AWS_REGION" \
               --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo None)
-            if [ "$status" = "Online" ]; then online=1; break; fi
+            if [ "$last_status" = "Online" ]; then online=1; break; fi
             sleep 10
           done
           if [ "$online" -ne 1 ]; then
-            echo "SSM_TIMEOUT=1" >> "$GITHUB_ENV"
-            echo 'O SSM Agent nao ficou Online dentro da janela esperada.' >&2
-            exit 1
+            echo "SSM_LAST_STATUS=$last_status" >> "$GITHUB_ENV"
+            fail_node_wait "O SSM Agent nao ficou Online dentro da janela esperada. Ultimo status: $last_status."
           fi
-      - name: Diagnose SSM timeout
-        if: failure() && env.SSM_TIMEOUT == '1'
+      - name: Diagnose node wait failure
+        if: failure() && steps.node.outcome == 'failure'
         run: |
-          set -euo pipefail
-          instance=$(aws ssm get-parameter --name /oficina/infra/k8s/instance-id --region "$AWS_REGION" --query Parameter.Value --output text)
+          set -uo pipefail
+          instance='${{ steps.node.outputs.instance_id }}'
+          if [ -z "$instance" ] || [ "$instance" = "None" ]; then
+            instance=$(aws ssm get-parameter --name /oficina/infra/k8s/instance-id --region "$AWS_REGION" --query Parameter.Value --output text 2>/dev/null || true)
+          fi
           {
-            echo '## Diagnostico: SSM sem resposta'
+            echo '## Diagnostico: K3s node sem resposta'
             echo
+            echo "- Estado EC2 antes da espera: ${EC2_STATE_BEFORE_WAIT:-desconhecido}"
+            echo "- Ultimo status SSM observado: ${SSM_LAST_STATUS:-nao consultado}"
+            echo
+            if [ -z "$instance" ] || [ "$instance" = "None" ]; then
+              echo 'Nao foi possivel resolver o instance-id pelo output do step nem pelo Parameter Store.'
+              exit 1
+            fi
             echo '### describe-instances'
             echo '```json'
             aws ec2 describe-instances --instance-ids "$instance" --region "$AWS_REGION" \
