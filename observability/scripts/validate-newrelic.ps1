@@ -261,6 +261,29 @@ if ($script:MetricasK8s.Count -gt 0) {
     Write-Host "  metricas de Kubernetes disponiveis ($($script:MetricasK8s.Count)):"
     foreach ($metrica in $script:MetricasK8s) { Write-Host "    $metrica" }
     Add-Check -Name 'Inventario de metricas de Kubernetes' -Status 'ok' -Detail "$($script:MetricasK8s.Count) metrica(s); lista completa no log do passo"
+
+    # Metricas citadas pelas queries versionadas do dashboard e das condicoes.
+    # Nao bloqueia: o gate acima ja provou a coleta. O objetivo aqui e que um nome
+    # errado apareca como pendencia nomeada, e nao como widget vazio ou alerta que
+    # existe sem nunca poder disparar.
+    $metricasVersionadas = @(
+        'k8s.node.cpu.usage',
+        'node.cpu.usage.percentage',
+        'node.memory.usage.percentage',
+        'container.cpu.usage',
+        'k8s.pod.memory.working_set',
+        'kube_pod_container_status_restarts_total',
+        'kube_pod_status_ready',
+        'kube_node_status_condition'
+    )
+
+    $ausentes = @($metricasVersionadas | Where-Object { $script:MetricasK8s -notcontains $_ })
+    if ($ausentes.Count -eq 0) {
+        Add-Check -Name 'Metricas usadas por widget e alerta' -Status 'ok' -Detail "$($metricasVersionadas.Count) metrica(s) presentes"
+    }
+    else {
+        Add-Check -Name 'Metricas usadas por widget e alerta' -Status 'pendente' -Detail "ausentes: $($ausentes -join ', '). Widget correspondente fica vazio e condicao sobre a metrica nao dispara."
+    }
 }
 
 Write-Step 'Descoberta dos Kubernetes Events (gate 10)'

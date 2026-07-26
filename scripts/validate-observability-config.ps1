@@ -293,6 +293,22 @@ if (Test-Path -LiteralPath $dashboardPath) {
     }
 }
 
+# K8sNodeSample, K8sPodSample, K8sContainerSample e InfrastructureEvent vem do
+# agente de infraestrutura (nri-kubernetes), ausente desta instalacao. Este stack
+# e o nr-k8s-otel-collector, que publica metricas dimensionais em Metric e eventos
+# em Log. Query sobre esses tipos nao da erro: ela retorna vazio, e o resultado e
+# widget em branco e condicao de alerta que nunca dispara.
+$tiposSemColeta = 'K8sNodeSample|K8sPodSample|K8sContainerSample|InfrastructureEvent'
+foreach ($arquivo in @('observability/dashboards/oficina-overview.json', 'observability/alerts/oficina-alerts.json')) {
+    $caminho = Join-Path $RepositoryRoot $arquivo
+    if (-not (Test-Path -LiteralPath $caminho)) { continue }
+
+    $conteudo = Get-Content -LiteralPath $caminho -Raw
+    if ($conteudo -match "(?<tipo>$tiposSemColeta)") {
+        Add-Failure "$arquivo consulta $($Matches['tipo']), que o nr-k8s-otel-collector nao produz. Use as metricas em Metric ou os eventos em Log."
+    }
+}
+
 if ($script:Failures.Count -gt 0) {
     Write-Host 'Configuracao de observabilidade reprovada:'
     foreach ($failure in $script:Failures) { Write-Host " - $failure" }
