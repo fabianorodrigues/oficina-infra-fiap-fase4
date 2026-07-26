@@ -131,7 +131,7 @@ if ($null -eq $existingDashboard) {
 mutation($accountId: Int!, $dashboard: DashboardInput!) {
   dashboardCreate(accountId: $accountId, dashboard: $dashboard) {
     entityResult { guid }
-    errors { description type }
+    errors { __typename }
   }
 }
 '@ -Variables @{ accountId = [int]$AccountId; dashboard = $dashboardInput }
@@ -144,7 +144,7 @@ else {
 mutation($guid: EntityGuid!, $dashboard: DashboardInput!) {
   dashboardUpdate(guid: $guid, dashboard: $dashboard) {
     entityResult { guid }
-    errors { description type }
+    errors { __typename }
   }
 }
 '@ -Variables @{ guid = $existingDashboard.guid; dashboard = $dashboardInput }
@@ -223,7 +223,7 @@ else {
 mutation($accountId: Int!, $monitor: SyntheticsCreateSimpleMonitorInput!) {
   syntheticsCreateSimpleMonitor(accountId: $accountId, monitor: $monitor) {
     monitor { guid name }
-    errors { description type }
+    errors { __typename }
   }
 }
 '@ -Variables @{ accountId = [int]$AccountId; monitor = $monitorInput }
@@ -236,7 +236,7 @@ mutation($accountId: Int!, $monitor: SyntheticsCreateSimpleMonitorInput!) {
 mutation($guid: EntityGuid!, $monitor: SyntheticsUpdateSimpleMonitorInput!) {
   syntheticsUpdateSimpleMonitor(guid: $guid, monitor: $monitor) {
     monitor { guid name }
-    errors { description type }
+    errors { __typename }
   }
 }
 '@ -Variables @{ guid = $existing.guid; monitor = $monitorInput }
