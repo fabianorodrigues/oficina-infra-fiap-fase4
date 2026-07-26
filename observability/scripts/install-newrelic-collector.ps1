@@ -139,7 +139,7 @@ k3s kubectl -n $namespace get pods -o wide
 "@
 Write-Host $baseline
 
-$baselinePressure = Get-NodePressure -Text $baseline
+$baselinePressure = @(Get-NodePressure -Text $baseline)
 if ($baselinePressure.Count -gt 0) {
     throw "Node ja sob pressao antes da instalacao: $($baselinePressure -join ', '). Resolver a causa anterior antes de instalar telemetria."
 }
@@ -345,7 +345,7 @@ k3s kubectl -n $($config.Namespace) get pods -o jsonpath='{range .items[*]}{.met
 "@
     Write-Host $gate
 
-    $violations = Test-CapacityGate -Text $gate -MinimumAvailableMi $config.MinimumAvailableMemoryMi
+    $violations = @(Test-CapacityGate -Text $gate -MinimumAvailableMi $config.MinimumAvailableMemoryMi)
     if ($violations.Count -gt 0) {
         # Fluxo B: o Helm terminou bem, mas os gates reprovaram. Aqui a reversao e
         # deliberada, e a estrategia depende da classificacao do passo 6.

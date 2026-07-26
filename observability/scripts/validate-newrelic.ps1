@@ -9,7 +9,7 @@
     Duas categorias de gate:
 
       - sempre exigidos: sinais do cluster, do proprio Collector e existencia dos
-        recursos provisionados, incluindo a cadeia de notificacao completa;
+        recursos provisionados que ja podem existir no ponto atual da sequencia;
       - exigidos so com ApplicationSignalsRequired: logs, spans, metricas HTTP e a
         comparacao tripla de service.version. Com a flag desligada eles sao
         registrados como "aguardando redeploy das APIs instrumentadas" e NAO
@@ -29,6 +29,7 @@ param(
     [string]$CorrelationId,
     [ValidateSet('US', 'EU')][string]$NewRelicRegion = 'US',
     [string]$ApiUrl,
+    [string]$NotificationEmail,
     [switch]$ApplicationSignalsRequired,
     [string]$ConfigPath,
     [ValidateRange(60, 900)][int]$TimeoutSeconds = 300,
@@ -61,6 +62,8 @@ if ([string]::IsNullOrWhiteSpace($CorrelationId)) {
 
 $config = Read-ObservabilityConfig -Path $ConfigPath
 $context = New-NerdGraphContext -AccountId $AccountId -ApiKey $UserApiKey -Region $NewRelicRegion
+$syntheticsExpected = -not [string]::IsNullOrWhiteSpace($ApiUrl)
+$notificationExpected = -not [string]::IsNullOrWhiteSpace($NotificationEmail)
 
 $services = @('oficina-cadastro', 'oficina-estoque', 'oficina-ordens-servico')
 $results = [System.Collections.Generic.List[object]]::new()
@@ -432,17 +435,22 @@ $sinceClause
 # ---------------------------------------------------------------------------
 # Recursos provisionados e cadeia de notificacao.
 #
-# Existencia das pecas nao basta: sem a condicao dentro da policy e o workflow
-# filtrando a policy, o uptime aparece no Synthetics e a indisponibilidade nao
-# vira e-mail.
+# A primeira passagem pode acontecer antes do Entrypoint. Nesse ponto dashboard,
+# policy e Collector sao obrigatorios, mas Synthetic Monitors dependem da URL
+# publica e ficam pendentes ate /oficina/infra/api/url existir.
 # ---------------------------------------------------------------------------
 Write-Step 'Recursos provisionados no New Relic'
 
-foreach ($entity in @(
-        @{ Label = 'Dashboard'; Query = "name = '$($config.DashboardName)' AND type = 'DASHBOARD'" },
-        @{ Label = 'Monitor Cadastro'; Query = "name = 'Oficina Cadastro - Health' AND type = 'MONITOR'" },
-        @{ Label = 'Monitor Estoque'; Query = "name = 'Oficina Estoque - Health' AND type = 'MONITOR'" },
-        @{ Label = 'Monitor Ordens'; Query = "name = 'Oficina Ordens - Health' AND type = 'MONITOR'" })) {
+$baseEntities = @(
+    @{ Label = 'Dashboard'; Query = "name = '$($config.DashboardName)' AND type = 'DASHBOARD'" }
+)
+$syntheticEntities = @(
+    @{ Label = 'Monitor Cadastro'; Query = "name = 'Oficina Cadastro - Health' AND type = 'MONITOR'" },
+    @{ Label = 'Monitor Estoque'; Query = "name = 'Oficina Estoque - Health' AND type = 'MONITOR'" },
+    @{ Label = 'Monitor Ordens'; Query = "name = 'Oficina Ordens - Health' AND type = 'MONITOR'" }
+)
+
+foreach ($entity in $baseEntities) {
     try {
         $found = Find-SingleEntity -Context $context -Query $entity.Query -Label $entity.Label
         if ($null -eq $found) {
@@ -454,6 +462,28 @@ foreach ($entity in @(
     }
     catch {
         Add-Check -Name $entity.Label -Status 'falha' -Detail $_.Exception.Message
+    }
+}
+
+if ($syntheticsExpected) {
+    foreach ($entity in $syntheticEntities) {
+        try {
+            $found = Find-SingleEntity -Context $context -Query $entity.Query -Label $entity.Label
+            if ($null -eq $found) {
+                Add-Check -Name $entity.Label -Status 'falha' -Detail 'Nao encontrado.'
+            }
+            else {
+                Add-Check -Name $entity.Label -Status 'ok' -Detail $found.guid
+            }
+        }
+        catch {
+            Add-Check -Name $entity.Label -Status 'falha' -Detail $_.Exception.Message
+        }
+    }
+}
+else {
+    foreach ($entity in $syntheticEntities) {
+        Add-Check -Name $entity.Label -Status 'pendente' -Detail 'URL publica indisponivel antes do Entrypoint Deploy.'
     }
 }
 
@@ -474,7 +504,9 @@ query($accountId: Int!, $name: String!) {
         $policyId = $policies[0].id
         Add-Check -Name 'Policy' -Status 'ok' -Detail $policyId
 
-        $conditions = Invoke-NerdGraph -Context $context -Query @'
+        $expectedSyntheticConditions = @('Oficina Cadastro - Health Failure', 'Oficina Estoque - Health Failure', 'Oficina Ordens - Health Failure')
+        if ($syntheticsExpected) {
+            $conditions = Invoke-NerdGraph -Context $context -Query @'
 query($accountId: Int!, $policyId: ID!) {
   actor { account(id: $accountId) { alerts {
     syntheticsMultiLocationConditionsSearch(searchCriteria: {policyId: $policyId}) {
@@ -484,21 +516,28 @@ query($accountId: Int!, $policyId: ID!) {
 }
 '@ -Variables @{ accountId = [int]$AccountId; policyId = $policyId }
 
-        $monitorConditions = @($conditions.data.actor.account.alerts.syntheticsMultiLocationConditionsSearch.conditions)
-        foreach ($expected in @('Oficina Cadastro - Health Failure', 'Oficina Estoque - Health Failure', 'Oficina Ordens - Health Failure')) {
-            $found = @($monitorConditions | Where-Object { $_.name -eq $expected })
-            if ($found.Count -eq 1 -and @($found[0].entities).Count -gt 0) {
-                Add-Check -Name "Condicao '$expected' na policy" -Status 'ok' -Detail "referencia $(@($found[0].entities).Count) monitor(es)"
+            $monitorConditions = @($conditions.data.actor.account.alerts.syntheticsMultiLocationConditionsSearch.conditions)
+            foreach ($expected in $expectedSyntheticConditions) {
+                $found = @($monitorConditions | Where-Object { $_.name -eq $expected })
+                if ($found.Count -eq 1 -and @($found[0].entities).Count -gt 0) {
+                    Add-Check -Name "Condicao '$expected' na policy" -Status 'ok' -Detail "referencia $(@($found[0].entities).Count) monitor(es)"
+                }
+                elseif ($found.Count -eq 1) {
+                    Add-Check -Name "Condicao '$expected' na policy" -Status 'falha' -Detail 'Condicao existe mas nao referencia monitor: a indisponibilidade nao viraria e-mail.'
+                }
+                else {
+                    Add-Check -Name "Condicao '$expected' na policy" -Status 'falha' -Detail "$($found.Count) ocorrencia(s); esperado 1."
+                }
             }
-            elseif ($found.Count -eq 1) {
-                Add-Check -Name "Condicao '$expected' na policy" -Status 'falha' -Detail 'Condicao existe mas nao referencia monitor: a indisponibilidade nao viraria e-mail.'
-            }
-            else {
-                Add-Check -Name "Condicao '$expected' na policy" -Status 'falha' -Detail "$($found.Count) ocorrencia(s); esperado 1."
+        }
+        else {
+            foreach ($expected in $expectedSyntheticConditions) {
+                Add-Check -Name "Condicao '$expected' na policy" -Status 'pendente' -Detail 'Aguardando URL publica para criar o monitor.'
             }
         }
 
-        $workflows = Invoke-NerdGraph -Context $context -Query @'
+        if ($notificationExpected) {
+            $workflows = Invoke-NerdGraph -Context $context -Query @'
 query($accountId: Int!) {
   actor { account(id: $accountId) { aiWorkflows {
     workflows { entities { id name workflowEnabled issuesFilter { predicates { attribute values } } } }
@@ -506,22 +545,26 @@ query($accountId: Int!) {
 }
 '@ -Variables @{ accountId = [int]$AccountId }
 
-        $matchingWorkflows = @($workflows.data.actor.account.aiWorkflows.workflows.entities | Where-Object { $_.name -eq $config.WorkflowName })
-        if ($matchingWorkflows.Count -ne 1) {
-            Add-Check -Name 'Workflow de notificacao' -Status 'falha' -Detail "$($matchingWorkflows.Count) ocorrencia(s); esperado 1."
-        }
-        else {
-            $filtersPolicy = $false
-            foreach ($predicate in @($matchingWorkflows[0].issuesFilter.predicates)) {
-                if (@($predicate.values) -contains [string]$policyId) { $filtersPolicy = $true }
-            }
-
-            if ($filtersPolicy) {
-                Add-Check -Name 'Workflow filtra a policy' -Status 'ok' -Detail $matchingWorkflows[0].id
+            $matchingWorkflows = @($workflows.data.actor.account.aiWorkflows.workflows.entities | Where-Object { $_.name -eq $config.WorkflowName })
+            if ($matchingWorkflows.Count -ne 1) {
+                Add-Check -Name 'Workflow de notificacao' -Status 'falha' -Detail "$($matchingWorkflows.Count) ocorrencia(s); esperado 1."
             }
             else {
-                Add-Check -Name 'Workflow filtra a policy' -Status 'falha' -Detail 'Workflow existe mas nao filtra esta policy: o incidente nao viraria e-mail.'
+                $filtersPolicy = $false
+                foreach ($predicate in @($matchingWorkflows[0].issuesFilter.predicates)) {
+                    if (@($predicate.values) -contains [string]$policyId) { $filtersPolicy = $true }
+                }
+
+                if ($filtersPolicy) {
+                    Add-Check -Name 'Workflow filtra a policy' -Status 'ok' -Detail $matchingWorkflows[0].id
+                }
+                else {
+                    Add-Check -Name 'Workflow filtra a policy' -Status 'falha' -Detail 'Workflow existe mas nao filtra esta policy: o incidente nao viraria e-mail.'
+                }
             }
+        }
+        else {
+            Add-Check -Name 'Workflow de notificacao' -Status 'pendente' -Detail 'NEW_RELIC_NOTIFICATION_EMAIL nao informado.'
         }
     }
 }
