@@ -222,6 +222,9 @@ Configuração opcional da New Relic:
 | `NEW_RELIC_REGION` | Variable | `US` ou `EU`; default `US` quando vazia | Não |
 | `NEW_RELIC_NOTIFICATION_EMAIL` | Variable | Destination/channel/workflow de alerta por e-mail | Não |
 
+> [!NOTE]
+> A entrega preferencial da `NEW_RELIC_LICENSE_KEY` usa um SecureString temporário em `/oficina/deploy/newrelic/*`. Em ambientes de laboratório onde a role do runner não tem `ssm:PutParameter`, o workflow usa fallback via Systems Manager Run Command para criar somente o Secret Kubernetes versionado do Collector. As APIs continuam recebendo apenas o endereço interno OTLP.
+
 Dois modos, pelos inputs:
 
 | Input | `false` | `true` |

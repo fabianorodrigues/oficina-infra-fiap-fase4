@@ -273,7 +273,7 @@ function Test-ObservabilityPermissions {
             $decision = $simulation.Output.Trim()
             Write-Host "  $($check.Principal): $action em $($check.Resource) -> $decision"
             if ($decision -in @('explicitDeny', 'implicitDeny')) {
-                throw "Permissao ausente. Principal: $($check.Arn). Acao: $action. Recurso: $($check.Resource). Regiao: $Region. Etapa bloqueada: criacao do SecureString da license key."
+                throw "Rota preferencial do SecureString indisponivel. Principal: $($check.Arn). Acao: $action. Recurso: $($check.Resource). Regiao: $Region."
             }
         }
     }
