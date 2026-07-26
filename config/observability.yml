@@ -1,0 +1,70 @@
+# Fonte unica da configuracao de observabilidade.
+#
+# Nada aqui e resolvido dinamicamente: versao movel de chart ou de imagem torna o
+# deploy irreproduzivel e faz o cluster mudar sem que nenhum arquivo mude.
+# scripts/validate-observability-config.ps1 garante que estes valores nao sejam
+# duplicados em outro lugar do repositorio.
+
+newRelic:
+  namespace: newrelic
+  release: nr-otel
+  # fullnameOverride define o nome do Service consumido pelas tres APIs. Trocar
+  # este valor exige atualizar os ConfigMaps dos tres repositorios de servico.
+  fullnameOverride: nr-otel
+  gatewayService: nr-otel-gateway
+  otlpGrpcPort: 4317
+  otlpHttpPort: 4318
+  clusterName: oficina-k3s
+  licenseSecretPrefix: newrelic-license
+  licenseSecretKey: licenseKey
+  # Prefixo do SecureString temporario. O caminho e obrigatorio: /oficina/deploy/*
+  # e o unico onde a instance role tem ssm:GetParameter e kms:Decrypt.
+  licenseParameterPrefix: /oficina/deploy/newrelic/
+
+helm:
+  # Major 3 e decisao, nao "a mais recente": o Helm 4 migrou post-renderer para o
+  # modelo de plugins e quebraria post-render-newrelic.sh.
+  version: 3.21.3
+  majorVersion: 3
+  # Historico alinhado com a retencao de Secrets. O default de 10 revisoes
+  # deixaria revisao antiga apontando para Secret ja removido.
+  historyMax: 2
+  architecture: x86_64
+  downloadUrl: https://get.helm.sh/helm-v3.21.3-linux-amd64.tar.gz
+  sha256: 15e041a93a590dce8100f39385cd98c84a765c9e36aeeb9e2dc6ff9e4769e2e0
+
+chart:
+  repositoryName: newrelic
+  repositoryUrl: https://helm-charts.newrelic.com
+  name: nr-k8s-otel-collector
+  # Versao exata resolvida por `helm search repo --versions`. Nunca latest.
+  version: 0.14.0
+
+# Imagens fixadas. O chart traz uma imagem auxiliar de kubectl com tag movel; sem
+# sobrescrever aqui, o cluster mudaria de artefato sem mudanca de codigo.
+images:
+  collector:
+    repository: newrelic/nrdot-collector-k8s
+    tag: 1.19.0
+  kubectl:
+    repository: bitnami/kubectl
+    tag: 1.31.4
+  kubeStateMetrics:
+    repository: registry.k8s.io/kube-state-metrics/kube-state-metrics
+    tag: v2.14.0
+
+# Orcamento de memoria dentro do t3.medium, somando ~512Mi de requests. Os
+# recursos das APIs nao sao reduzidos para acomodar telemetria.
+resources:
+  totalMemoryRequestMi: 512
+  minimumAvailableMemoryMi: 512
+
+provisioning:
+  dashboardName: FIAP Oficina - Visao Geral
+  policyName: FIAP Oficina - Producao
+  workflowName: FIAP Oficina - Email
+  monitorPrefix: Oficina
+  tags:
+    managedBy: fiap-fase4
+    solution: oficina
+    environment: production

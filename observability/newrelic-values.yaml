@@ -1,0 +1,123 @@
+# Values do nr-k8s-otel-collector.
+#
+# Este arquivo e versionado e NAO contem secret.
+# customSecretName fica de fora de proposito: o nome do Secret e versionado por
+# execucao (newrelic-license-<run-id>) e chega por --set-string. Um Secret estavel
+# sobrescrito a cada execucao inviabilizaria rollback, porque a revisao anterior
+# do Helm passaria a apontar para uma licenca que nao existe mais com aquele
+# conteudo.
+#
+# Os valores de versao, imagem e nome vem de config/observability.yml. Alterar
+# aqui sem alterar la faz validate-observability-config.ps1 reprovar.
+
+cluster: oficina-k3s
+
+# Define o nome do Service consumido pelas tres APIs: nr-otel-gateway.
+fullnameOverride: nr-otel
+
+# Envia somente o necessario para a UI de Kubernetes da New Relic. Obrigatorio no
+# t3.medium: o volume cheio nao cabe no orcamento de ingestao nem de memoria.
+lowDataMode: true
+
+customSecretLicenseKey: licenseKey
+
+# Falso por default no chart. Sem ligar, o alerta "Collector sem sinal" nao teria
+# sinal nenhum para consultar e existiria sem base.
+collectorObservability:
+  enabled: true
+  scrapeIntervalMs: 60000
+
+image:
+  repository: newrelic/nrdot-collector-k8s
+  tag: 1.19.0
+  pullPolicy: IfNotPresent
+
+# O chart usa uma imagem auxiliar de kubectl com tag movel. Fixar e obrigatorio:
+# sem isso o cluster troca de artefato sem nenhuma mudanca de codigo.
+kubectl:
+  image:
+    repository: bitnami/kubectl
+    tag: 1.31.4
+    pullPolicy: IfNotPresent
+
+receivers:
+  prometheus:
+    enabled: true
+    scrapeInterval: 1m
+  k8sEvents:
+    enabled: true
+  hostmetrics:
+    enabled: true
+    collectionInterval: 1m
+  kubeletstats:
+    enabled: true
+    collectionInterval: 1m
+  # Logs chegam pelo stdout dos containers. A aplicacao nao exporta log por OTLP:
+  # os dois caminhos juntos entregariam o mesmo registro duas vezes.
+  filelog:
+    enabled: true
+
+daemonset:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 200Mi
+    limits:
+      cpu: 300m
+      memory: 300Mi
+
+deployment:
+  enabled: true
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 400m
+      memory: 384Mi
+  configMap:
+    # O receiver otlp, os processors e o exporter da New Relic JA existem no
+    # config renderizado do chart. Nada disso e redeclarado: declarar duas vezes o
+    # mesmo componente e erro de configuracao do Collector.
+    # Aqui so entram as pipelines dedicadas, referenciando os componentes
+    # existentes pelo nome real, confirmado no manifesto da versao fixada.
+    # Nao existe pipeline de logs vinda de OTLP.
+    extraConfig:
+      service:
+        pipelines:
+          traces/oficina:
+            receivers:
+              - otlp
+            processors:
+              - memory_limiter
+              - batch
+            exporters:
+              - otlp_http/newrelic
+          metrics/oficina:
+            receivers:
+              - otlp
+            processors:
+              - memory_limiter
+              - batch
+            exporters:
+              - otlp_http/newrelic
+
+kube-state-metrics:
+  enabled: true
+  # Recreate vem daqui, e nao do post-renderer: o subchart expoe a chave propria,
+  # e casar o nome do KSM num script de texto seria fragil sem necessidade.
+  updateStrategy: Recreate
+  replicas: 1
+  image:
+    registry: registry.k8s.io
+    repository: kube-state-metrics/kube-state-metrics
+    tag: v2.14.0
+  resources:
+    requests:
+      cpu: 20m
+      memory: 56Mi
+    limits:
+      cpu: 100m
+      memory: 96Mi

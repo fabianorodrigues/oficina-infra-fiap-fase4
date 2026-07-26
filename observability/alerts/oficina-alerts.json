@@ -1,0 +1,165 @@
+{
+  "_comment": [
+    "Politica e condicoes provisionadas por observability/scripts/provision-newrelic.ps1.",
+    "NRQL de Alert Condition NAO e NRQL de consulta: condicoes sao processadas por",
+    "streaming e nao aceitam SINCE, UNTIL, TIMESERIES nem LIMIT. A janela vive em",
+    "aggregationWindow e thresholdDuration.",
+    "requiresGate indica condicao que depende de descoberta remota: o script so a",
+    "provisiona depois que a query for validada e versionada."
+  ],
+  "policy": {
+    "name": "FIAP Oficina - Producao",
+    "incidentPreference": "PER_CONDITION"
+  },
+  "conditions": [
+    {
+      "name": "Oficina Cadastro - Health Failure",
+      "_comment": "Criar o monitor nao notifica nada por si so: sem condicao dentro da policy a indisponibilidade nao vira e-mail. Tres falhas consecutivas e o comportamento nativo do Synthetic Monitor.",
+      "type": "SYNTHETIC_MULTI_LOCATION",
+      "monitorName": "Oficina Cadastro - Health",
+      "criticalThreshold": 1,
+      "thresholdDuration": 300,
+      "violationTimeLimitSeconds": 3600
+    },
+    {
+      "name": "Oficina Estoque - Health Failure",
+      "type": "SYNTHETIC_MULTI_LOCATION",
+      "monitorName": "Oficina Estoque - Health",
+      "criticalThreshold": 1,
+      "thresholdDuration": 300,
+      "violationTimeLimitSeconds": 3600
+    },
+    {
+      "name": "Oficina Ordens - Health Failure",
+      "type": "SYNTHETIC_MULTI_LOCATION",
+      "monitorName": "Oficina Ordens - Health",
+      "criticalThreshold": 1,
+      "thresholdDuration": 300,
+      "violationTimeLimitSeconds": 3600
+    },
+    {
+      "name": "Oficina - Perda de telemetria",
+      "_comment": "Loss of signal, nao threshold: o problema e a ausencia de dado, e um threshold sobre serie vazia nunca dispara.",
+      "type": "NRQL_STATIC",
+      "nrql": "FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' AND service.name LIKE 'oficina-%'",
+      "aggregationMethod": "EVENT_FLOW",
+      "aggregationWindow": 60,
+      "aggregationDelay": 120,
+      "lossOfSignal": {
+        "expirationDuration": 300,
+        "openViolationOnExpiration": true,
+        "closeViolationsOnExpiration": false
+      },
+      "requiresGate": 12
+    },
+    {
+      "name": "Oficina - Collector sem sinal",
+      "type": "NRQL_STATIC",
+      "nrql": "FROM Metric SELECT count(*) WHERE metricName LIKE 'otelcol_%'",
+      "aggregationMethod": "EVENT_FLOW",
+      "aggregationWindow": 60,
+      "aggregationDelay": 120,
+      "lossOfSignal": {
+        "expirationDuration": 300,
+        "openViolationOnExpiration": true,
+        "closeViolationsOnExpiration": false
+      }
+    },
+    {
+      "name": "Oficina - Taxa de erro 5xx",
+      "_comment": "Filtrar por metricName e obrigatorio: sem isso o count(*) varreria toda a tabela Metric e a porcentagem nao seria taxa de erro de request nenhuma. O fallback em Span e escolhido automaticamente pelo gate 12.",
+      "type": "NRQL_STATIC",
+      "nrql": "FROM Metric SELECT percentage(count(*), WHERE http.response.status_code >= 500) WHERE metricName = 'http.server.request.duration' AND service.name LIKE 'oficina-%' FACET service.name",
+      "nrqlFallback": "FROM Span SELECT percentage(count(*), WHERE http.response.status_code >= 500) WHERE service.name LIKE 'oficina-%' AND span.kind = 'server' FACET service.name",
+      "operator": "ABOVE",
+      "criticalThreshold": 5,
+      "aggregationMethod": "EVENT_FLOW",
+      "aggregationWindow": 60,
+      "aggregationDelay": 120,
+      "thresholdDuration": 300,
+      "thresholdOccurrences": "ALL",
+      "requiresGate": 12
+    },
+    {
+      "name": "Oficina - Falha no processamento da OS",
+      "type": "NRQL_STATIC",
+      "nrql": "FROM Metric SELECT sum(oficina.os.processing.failures) FACET stage",
+      "operator": "ABOVE",
+      "criticalThreshold": 0,
+      "aggregationMethod": "EVENT_FLOW",
+      "aggregationWindow": 60,
+      "aggregationDelay": 120,
+      "thresholdDuration": 300,
+      "thresholdOccurrences": "AT_LEAST_ONCE"
+    },
+    {
+      "name": "Oficina - Falha de integracao",
+      "type": "NRQL_STATIC",
+      "nrql": "FROM Metric SELECT sum(oficina.integration.failures) FACET integration",
+      "operator": "ABOVE",
+      "criticalThreshold": 0,
+      "aggregationMethod": "EVENT_FLOW",
+      "aggregationWindow": 60,
+      "aggregationDelay": 120,
+      "thresholdDuration": 300,
+      "thresholdOccurrences": "AT_LEAST_ONCE"
+    },
+    {
+      "name": "Oficina - CPU alta no node",
+      "type": "NRQL_STATIC",
+      "nrql": "FROM K8sNodeSample SELECT average(cpuUsedCores) * 100 / average(allocatableCpuCores) WHERE clusterName = 'oficina-k3s' FACET nodeName",
+      "operator": "ABOVE",
+      "criticalThreshold": 80,
+      "aggregationMethod": "EVENT_FLOW",
+      "aggregationWindow": 60,
+      "aggregationDelay": 120,
+      "thresholdDuration": 600,
+      "thresholdOccurrences": "ALL",
+      "requiresGate": 11
+    },
+    {
+      "name": "Oficina - Memoria alta no node",
+      "type": "NRQL_STATIC",
+      "nrql": "FROM K8sNodeSample SELECT average(memoryWorkingSetUtilization) WHERE clusterName = 'oficina-k3s' FACET nodeName",
+      "operator": "ABOVE",
+      "criticalThreshold": 85,
+      "aggregationMethod": "EVENT_FLOW",
+      "aggregationWindow": 60,
+      "aggregationDelay": 120,
+      "thresholdDuration": 600,
+      "thresholdOccurrences": "ALL",
+      "requiresGate": 11
+    },
+    {
+      "name": "Oficina - Pod nao pronto",
+      "type": "NRQL_STATIC",
+      "nrql": "FROM K8sPodSample SELECT uniqueCount(podName) WHERE clusterName = 'oficina-k3s' AND status != 'Running'",
+      "operator": "ABOVE_OR_EQUALS",
+      "criticalThreshold": 1,
+      "aggregationMethod": "EVENT_FLOW",
+      "aggregationWindow": 60,
+      "aggregationDelay": 120,
+      "thresholdDuration": 300,
+      "thresholdOccurrences": "ALL",
+      "requiresGate": 11
+    },
+    {
+      "name": "Oficina - Reinicio excessivo de container",
+      "type": "NRQL_STATIC",
+      "nrql": "FROM K8sContainerSample SELECT derivative(restartCount, 10 minutes) WHERE clusterName = 'oficina-k3s' FACET podName",
+      "operator": "ABOVE",
+      "criticalThreshold": 2,
+      "aggregationMethod": "EVENT_FLOW",
+      "aggregationWindow": 60,
+      "aggregationDelay": 120,
+      "thresholdDuration": 600,
+      "thresholdOccurrences": "AT_LEAST_ONCE",
+      "requiresGate": 11
+    }
+  ],
+  "notification": {
+    "destinationName": "FIAP Oficina - Email",
+    "channelName": "FIAP Oficina - Email",
+    "workflowName": "FIAP Oficina - Email"
+  }
+}

@@ -1,0 +1,385 @@
+name: Observability Deploy
+
+# Substitui o Observability Validate, preservando tudo que ele ja validava:
+# log groups do API Gateway, metricas do ALB, profundidade de filas, DLQ zerada e
+# estado do cluster.
+#
+# Duas passagens, porque na primeira execucao os Pods das APIs ainda rodam a versao
+# anterior, sem OTEL_EXPORTER_OTLP_ENDPOINT nem o formatter novo. Exigir logs,
+# spans e metricas das tres APIs nessa mesma execucao reprovaria o workflow mesmo
+# com o Collector instalado corretamente:
+#
+#   1. validation_only=false  application_signals_required=false
+#   2. redeploy Cadastro, Estoque e Ordens
+#   3. validation_only=true   application_signals_required=true
+#   4. consolidacao, so se a passagem 3 descobriu query a persistir:
+#      validation_only=false  application_signals_required=true
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Digite DEPLOY para confirmar. Em validation_only some com essa exigencia.'
+        required: false
+        default: ''
+      validation_only:
+        description: 'true = somente leitura: nao instala Helm, nao aplica Helm, nao cria Secret, nao altera New Relic.'
+        type: boolean
+        required: false
+        default: false
+      application_signals_required:
+        description: 'true = exigir logs, spans, metricas HTTP e service.version das tres APIs. Use apenas depois do redeploy.'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # cancel-in-progress: false de proposito. Cancelar no meio de um helm upgrade
+  # deixa o release travado em pending-upgrade.
+  group: observability
+  cancel-in-progress: false
+
+jobs:
+  observability:
+    name: Provisionar e validar observabilidade
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      NEW_RELIC_ACCOUNT_ID: ${{ vars.NEW_RELIC_ACCOUNT_ID }}
+      NEW_RELIC_REGION: ${{ vars.NEW_RELIC_REGION }}
+      NEW_RELIC_CLUSTER_NAME: ${{ vars.NEW_RELIC_CLUSTER_NAME }}
+      NEW_RELIC_NOTIFICATION_EMAIL: ${{ vars.NEW_RELIC_NOTIFICATION_EMAIL }}
+      VALIDATION_ONLY: ${{ inputs.validation_only }}
+      APPLICATION_SIGNALS_REQUIRED: ${{ inputs.application_signals_required }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # 1. Validar variables e secrets, condicionado ao modo.
+      #
+      # Em validation_only nenhum Secret e criado e nenhum destino de notificacao e
+      # tocado: exigir a license key ali bloquearia uma execucao de leitura sem
+      # motivo.
+      - name: Validate variables and secrets
+        shell: pwsh
+        env:
+          NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+          NEW_RELIC_USER_API_KEY: ${{ secrets.NEW_RELIC_USER_API_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $validationOnly = $env:VALIDATION_ONLY -eq 'true'
+
+          if (-not $validationOnly -and $env:GITHUB_REF -ne 'refs/heads/main') {
+            throw "Deploy so a partir de refs/heads/main (atual: $env:GITHUB_REF)."
+          }
+          if (-not $validationOnly -and '${{ inputs.confirmation }}' -cne 'DEPLOY') {
+            throw 'Confirmacao invalida. Digite DEPLOY para executar o caminho que altera recursos.'
+          }
+
+          $obrigatorios = [ordered]@{
+            AWS_REGION             = $env:AWS_REGION
+            NEW_RELIC_ACCOUNT_ID   = $env:NEW_RELIC_ACCOUNT_ID
+            NEW_RELIC_REGION       = $env:NEW_RELIC_REGION
+            NEW_RELIC_CLUSTER_NAME = $env:NEW_RELIC_CLUSTER_NAME
+            NEW_RELIC_USER_API_KEY = $env:NEW_RELIC_USER_API_KEY
+          }
+
+          if (-not $validationOnly) {
+            $obrigatorios['NEW_RELIC_LICENSE_KEY'] = $env:NEW_RELIC_LICENSE_KEY
+            $obrigatorios['NEW_RELIC_NOTIFICATION_EMAIL'] = $env:NEW_RELIC_NOTIFICATION_EMAIL
+          }
+
+          $ausentes = @($obrigatorios.GetEnumerator() | Where-Object { [string]::IsNullOrWhiteSpace($_.Value) } | ForEach-Object { $_.Key })
+          if ($ausentes.Count -gt 0) {
+            throw "Configuracao ausente: $($ausentes -join ', ')."
+          }
+
+          if ($env:NEW_RELIC_REGION -notin @('US', 'EU')) {
+            throw "NEW_RELIC_REGION deve ser US ou EU (atual: $env:NEW_RELIC_REGION)."
+          }
+          if ($env:NEW_RELIC_CLUSTER_NAME -ne 'oficina-k3s') {
+            throw "NEW_RELIC_CLUSTER_NAME deve ser oficina-k3s (atual: $env:NEW_RELIC_CLUSTER_NAME)."
+          }
+
+          Write-Host "Modo: $(if ($validationOnly) { 'validacao (somente leitura)' } else { 'provisionamento' })"
+          Write-Host "Sinais de aplicacao obrigatorios: $env:APPLICATION_SIGNALS_REQUIRED"
+
+      - name: Validate observability config
+        shell: pwsh
+        run: ./scripts/validate-observability-config.ps1
+
+      - name: Test post-renderer contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          # O post-renderer altera manifesto que sera aplicado no cluster: o
+          # contrato precisa ser provado antes de qualquer upgrade.
+          sh observability/scripts/test-post-render.sh
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # 2. Resolver EC2, namespace e URL publica existentes.
+      - name: Resolve platform outputs
+        id: platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          instance=$(aws ssm get-parameter --name /oficina/infra/k8s/instance-id \
+            --region "$AWS_REGION" --query Parameter.Value --output text)
+          namespace=$(aws ssm get-parameter --name /oficina/infra/k8s/namespace \
+            --region "$AWS_REGION" --query Parameter.Value --output text)
+
+          # A URL publica pode nao existir ainda: os Synthetic Monitors so sao
+          # criados depois que ela resolve.
+          api_url=$(aws ssm get-parameter --name /oficina/infra/api/url \
+            --region "$AWS_REGION" --query Parameter.Value --output text 2>/dev/null || echo '')
+
+          echo "instance=$instance" >> "$GITHUB_OUTPUT"
+          echo "namespace=$namespace" >> "$GITHUB_OUTPUT"
+          echo "api_url=$api_url" >> "$GITHUB_OUTPUT"
+          echo "correlation_id=observability-validation-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+
+          echo "node: $instance | namespace: $namespace"
+          if [ -z "$api_url" ]; then
+            echo 'URL publica indisponivel: monitores e requisicoes de origem serao registrados como pendentes.'
+          fi
+
+      # 3. Aguardar EC2 Online no SSM.
+      - name: Wait for SSM Online
+        shell: bash
+        run: |
+          set -euo pipefail
+          instance='${{ steps.platform.outputs.instance }}'
+          for _ in $(seq 1 30); do
+            status=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=$instance" --region "$AWS_REGION" \
+              --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo 'Unknown')
+            if [ "$status" = 'Online' ]; then
+              echo "node $instance Online."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "node $instance nao ficou Online no Systems Manager." >&2
+          exit 1
+
+      # Passos 4 a 11 do install: Helm, baseline, classificacao, SecureString,
+      # Secret versionado, template com post-renderer, upgrade e gates.
+      - name: Install or update the New Relic Collector
+        shell: pwsh
+        env:
+          NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $argumentos = @{
+            AwsRegion = $env:AWS_REGION
+            RunId     = $env:GITHUB_RUN_ID
+          }
+          if ($env:VALIDATION_ONLY -eq 'true') {
+            $argumentos['ValidationOnly'] = $true
+          }
+          else {
+            $argumentos['LicenseKey'] = $env:NEW_RELIC_LICENSE_KEY
+          }
+          ./observability/scripts/install-newrelic-collector.ps1 @argumentos
+
+      # 8. Validar o endpoint OTLP interno a partir do namespace das APIs, que e o
+      #    caminho real que elas usam. Testar de fora do namespace nao provaria a
+      #    resolucao de DNS entre namespaces.
+      - name: Validate internal OTLP endpoint
+        if: ${{ inputs.validation_only == false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          instance='${{ steps.platform.outputs.instance }}'
+          namespace='${{ steps.platform.outputs.namespace }}'
+
+          cat > /tmp/otlp-check.sh <<'EOF'
+          set -eu
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          export PATH="$PATH:/usr/local/bin"
+          alvo="nr-otel-gateway.newrelic.svc.cluster.local"
+          pod="$(k3s kubectl -n NAMESPACE_PLACEHOLDER get pods -l app.kubernetes.io/component=api \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+          if [ -z "$pod" ]; then
+            pod="$(k3s kubectl -n NAMESPACE_PLACEHOLDER get pods -o jsonpath='{.items[0].metadata.name}')"
+          fi
+          echo "testando de $pod"
+          k3s kubectl -n NAMESPACE_PLACEHOLDER exec "$pod" -- \
+            timeout 10 sh -c "cat < /dev/null > /dev/tcp/$alvo/4317" \
+            && echo 'OTLP_REACHABLE=true' \
+            || { echo "Gateway OTLP inalcancavel em $alvo:4317 a partir do namespace das APIs." >&2; exit 1; }
+          EOF
+          sed -i "s|NAMESPACE_PLACEHOLDER|$namespace|g" /tmp/otlp-check.sh
+          jq -Rs '{commands: [.]}' < /tmp/otlp-check.sh > /tmp/otlp-check.json
+
+          command_id=$(aws ssm send-command --instance-ids "$instance" \
+            --document-name AWS-RunShellScript --comment 'OTLP interno' \
+            --region "$AWS_REGION" --parameters file:///tmp/otlp-check.json \
+            --query 'Command.CommandId' --output text)
+
+          status=Pending
+          for _ in $(seq 1 40); do
+            status=$(aws ssm get-command-invocation --command-id "$command_id" \
+              --instance-id "$instance" --region "$AWS_REGION" --query Status --output text 2>/dev/null || echo Pending)
+            case "$status" in Success|Failed|Cancelled|TimedOut) break ;; esac
+            sleep 5
+          done
+
+          aws ssm get-command-invocation --command-id "$command_id" --instance-id "$instance" \
+            --region "$AWS_REGION" --query StandardOutputContent --output text
+          aws ssm get-command-invocation --command-id "$command_id" --instance-id "$instance" \
+            --region "$AWS_REGION" --query StandardErrorContent --output text >&2
+          test "$status" = 'Success'
+
+      # 9 a 12. Dashboard, policy, condicoes, notificacao e Synthetic Monitors.
+      - name: Provision New Relic resources
+        if: ${{ inputs.validation_only == false }}
+        shell: pwsh
+        env:
+          NEW_RELIC_USER_API_KEY: ${{ secrets.NEW_RELIC_USER_API_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $argumentos = @{
+            AccountId      = $env:NEW_RELIC_ACCOUNT_ID
+            UserApiKey     = $env:NEW_RELIC_USER_API_KEY
+            NewRelicRegion = $env:NEW_RELIC_REGION
+          }
+          if (-not [string]::IsNullOrWhiteSpace($env:NEW_RELIC_NOTIFICATION_EMAIL)) {
+            $argumentos['NotificationEmail'] = $env:NEW_RELIC_NOTIFICATION_EMAIL
+          }
+          $apiUrl = '${{ steps.platform.outputs.api_url }}'
+          if (-not [string]::IsNullOrWhiteSpace($apiUrl)) {
+            $argumentos['ApiUrl'] = $apiUrl
+          }
+          if ($env:APPLICATION_SIGNALS_REQUIRED -eq 'true') {
+            $argumentos['ApplicationSignalsReady'] = $true
+          }
+          ./observability/scripts/provision-newrelic.ps1 @argumentos
+
+      # 13 a 15. Requisicoes com correlationId conhecido e consulta com polling.
+      - name: Validate telemetry in New Relic
+        shell: pwsh
+        env:
+          NEW_RELIC_USER_API_KEY: ${{ secrets.NEW_RELIC_USER_API_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $argumentos = @{
+            AwsRegion      = $env:AWS_REGION
+            AccountId      = $env:NEW_RELIC_ACCOUNT_ID
+            UserApiKey     = $env:NEW_RELIC_USER_API_KEY
+            NewRelicRegion = $env:NEW_RELIC_REGION
+            CorrelationId  = '${{ steps.platform.outputs.correlation_id }}'
+          }
+          $apiUrl = '${{ steps.platform.outputs.api_url }}'
+          if (-not [string]::IsNullOrWhiteSpace($apiUrl)) {
+            $argumentos['ApiUrl'] = $apiUrl
+          }
+          if ($env:APPLICATION_SIGNALS_REQUIRED -eq 'true') {
+            $argumentos['ApplicationSignalsRequired'] = $true
+          }
+          ./observability/scripts/validate-newrelic.ps1 @argumentos
+
+      # Validacoes preservadas do Observability Validate anterior.
+      - name: Validate edge log groups and ALB metrics
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws logs describe-log-groups --log-group-name-prefix /aws/apigateway/oficina-api \
+            --region "$AWS_REGION" --query 'logGroups[0].logGroupName' --output text | grep -v '^None$'
+          aws cloudwatch list-metrics --namespace AWS/ApplicationELB --metric-name HealthyHostCount \
+            --region "$AWS_REGION" >/dev/null
+
+      - name: Validate queue depth and dead-letter queues
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          for queue in estoque-comandos ordens-eventos; do
+            url=$(aws ssm get-parameter --name "/oficina/infra/sqs/${queue}/url" \
+              --region "$AWS_REGION" --query Parameter.Value --output text)
+            aws sqs get-queue-attributes --queue-url "$url" --attribute-names ApproximateNumberOfMessages \
+              --region "$AWS_REGION" --query 'Attributes.ApproximateNumberOfMessages' --output text
+
+            dlq_url=$(aws ssm get-parameter --name "/oficina/infra/sqs/${queue}-dlq/url" \
+              --region "$AWS_REGION" --query Parameter.Value --output text)
+            depth=$(aws sqs get-queue-attributes --queue-url "$dlq_url" --attribute-names ApproximateNumberOfMessages \
+              --region "$AWS_REGION" --query 'Attributes.ApproximateNumberOfMessages' --output text)
+            echo "DLQ ${queue}-dlq: ${depth} mensagem(ns)."
+            if [ "$depth" != "0" ]; then
+              echo "DLQ ${queue}-dlq com mensagens; investigar antes de considerar a validacao concluida." >&2
+              exit 1
+            fi
+          done
+
+      - name: Validate cluster workloads
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          instance='${{ steps.platform.outputs.instance }}'
+          namespace='${{ steps.platform.outputs.namespace }}'
+
+          cat > /tmp/observability-check.sh <<'EOF'
+          set -euo pipefail
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          export PATH="$PATH:/usr/local/bin"
+          k3s kubectl -n NAMESPACE_PLACEHOLDER get pods -o wide
+          k3s kubectl -n NAMESPACE_PLACEHOLDER get deployments
+          k3s kubectl -n newrelic get pods -o wide 2>/dev/null || echo 'namespace newrelic ausente'
+          k3s kubectl describe node | sed -n '/Conditions:/,/Addresses:/p'
+          free -m
+          df -h /
+          EOF
+          sed -i "s|NAMESPACE_PLACEHOLDER|$namespace|g" /tmp/observability-check.sh
+          jq -Rs '{commands: [.]}' < /tmp/observability-check.sh > /tmp/observability-check.json
+
+          command_id=$(aws ssm send-command --instance-ids "$instance" \
+            --document-name AWS-RunShellScript --comment 'Observability validation' \
+            --region "$AWS_REGION" --parameters file:///tmp/observability-check.json \
+            --query 'Command.CommandId' --output text)
+
+          status=Pending
+          for _ in $(seq 1 40); do
+            status=$(aws ssm get-command-invocation --command-id "$command_id" --instance-id "$instance" \
+              --region "$AWS_REGION" --query Status --output text 2>/dev/null || echo Pending)
+            case "$status" in Success|Failed|Cancelled|TimedOut) break ;; esac
+            sleep 5
+          done
+
+          {
+            echo '## Estado do cluster'
+            echo '```'
+            aws ssm get-command-invocation --command-id "$command_id" --instance-id "$instance" \
+              --region "$AWS_REGION" --query StandardOutputContent --output text
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$status" = 'Success'
+
+      - name: Publish next steps
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## Proximos passos'
+            echo ''
+            if [ "${APPLICATION_SIGNALS_REQUIRED}" != 'true' ]; then
+              echo '1. Redeploy de Cadastro, Estoque e Ordens, nessa ordem.'
+              echo '2. Reexecutar este workflow com `validation_only=true` e `application_signals_required=true`.'
+              echo ''
+              echo 'Os sinais das APIs ficaram registrados como pendentes: os Pods ainda rodam a versao anterior a instrumentacao.'
+            else
+              echo 'Se o passo de validacao reportou query descoberta pendente de persistencia, reexecutar com `validation_only=false` e `application_signals_required=true` para consolidar.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

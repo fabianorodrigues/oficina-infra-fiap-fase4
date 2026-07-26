@@ -71,4 +71,4 @@ provisioningOrder:
   - Collection Postman
 
 optionalValidations:
-  - Observability Validate
+  - Observability Deploy
