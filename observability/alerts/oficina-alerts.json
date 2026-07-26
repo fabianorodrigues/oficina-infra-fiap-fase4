@@ -107,7 +107,7 @@
     {
       "name": "Oficina - CPU alta no node",
       "type": "NRQL_STATIC",
-      "nrql": "FROM K8sNodeSample SELECT average(cpuUsedCores) * 100 / average(allocatableCpuCores) WHERE clusterName = 'oficina-k3s' FACET nodeName",
+      "nrql": "FROM Metric SELECT average(node.cpu.usage.percentage) WHERE k8s.cluster.name = 'oficina-k3s' FACET k8s.node.name",
       "operator": "ABOVE",
       "criticalThreshold": 80,
       "aggregationMethod": "EVENT_FLOW",
@@ -120,7 +120,7 @@
     {
       "name": "Oficina - Memoria alta no node",
       "type": "NRQL_STATIC",
-      "nrql": "FROM K8sNodeSample SELECT average(memoryWorkingSetUtilization) WHERE clusterName = 'oficina-k3s' FACET nodeName",
+      "nrql": "FROM Metric SELECT average(node.memory.usage.percentage) WHERE k8s.cluster.name = 'oficina-k3s' FACET k8s.node.name",
       "operator": "ABOVE",
       "criticalThreshold": 85,
       "aggregationMethod": "EVENT_FLOW",
@@ -133,8 +133,8 @@
     {
       "name": "Oficina - Pod nao pronto",
       "type": "NRQL_STATIC",
-      "nrql": "FROM K8sPodSample SELECT uniqueCount(podName) WHERE clusterName = 'oficina-k3s' AND status != 'Running'",
-      "operator": "ABOVE_OR_EQUALS",
+      "nrql": "FROM Metric SELECT min(kube_pod_status_ready) WHERE k8s.cluster.name = 'oficina-k3s' AND condition = 'true' FACET pod",
+      "operator": "BELOW",
       "criticalThreshold": 1,
       "aggregationMethod": "EVENT_FLOW",
       "aggregationWindow": 60,
@@ -146,7 +146,7 @@
     {
       "name": "Oficina - Reinicio excessivo de container",
       "type": "NRQL_STATIC",
-      "nrql": "FROM K8sContainerSample SELECT derivative(restartCount, 10 minutes) WHERE clusterName = 'oficina-k3s' FACET podName",
+      "nrql": "FROM Metric SELECT derivative(kube_pod_container_status_restarts_total, 10 minutes) WHERE k8s.cluster.name = 'oficina-k3s' FACET pod",
       "operator": "ABOVE",
       "criticalThreshold": 2,
       "aggregationMethod": "EVENT_FLOW",

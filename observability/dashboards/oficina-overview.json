@@ -281,7 +281,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM K8sNodeSample SELECT average(cpuUsedCores) WHERE clusterName = 'oficina-k3s' FACET nodeName TIMESERIES",
+                "query": "FROM Metric SELECT average(k8s.node.cpu.usage) WHERE k8s.cluster.name = 'oficina-k3s' FACET k8s.node.name TIMESERIES",
                 "requiresGate": 11
               }
             ]
@@ -295,7 +295,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM K8sNodeSample SELECT average(memoryWorkingSetUtilization) WHERE clusterName = 'oficina-k3s' FACET nodeName TIMESERIES",
+                "query": "FROM Metric SELECT average(node.memory.usage.percentage) WHERE k8s.cluster.name = 'oficina-k3s' FACET k8s.node.name TIMESERIES",
                 "requiresGate": 11
               }
             ]
@@ -323,7 +323,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM K8sPodSample SELECT average(cpuUsedCores) WHERE clusterName = 'oficina-k3s' FACET podName TIMESERIES",
+                "query": "FROM Metric SELECT sum(container.cpu.usage) WHERE k8s.cluster.name = 'oficina-k3s' FACET k8s.pod.name TIMESERIES",
                 "requiresGate": 11
               }
             ]
@@ -337,7 +337,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM K8sPodSample SELECT average(memoryWorkingSetBytes) WHERE clusterName = 'oficina-k3s' FACET podName TIMESERIES",
+                "query": "FROM Metric SELECT average(k8s.pod.memory.working_set) WHERE k8s.cluster.name = 'oficina-k3s' FACET k8s.pod.name TIMESERIES",
                 "requiresGate": 11
               }
             ]
@@ -351,35 +351,35 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM K8sContainerSample SELECT latest(restartCount) WHERE clusterName = 'oficina-k3s' FACET podName, containerName",
+                "query": "FROM Metric SELECT latest(kube_pod_container_status_restarts_total) WHERE k8s.cluster.name = 'oficina-k3s' FACET pod, container",
                 "requiresGate": 11
               }
             ]
           }
         },
         {
-          "title": "Pods nao prontos",
+          "title": "Prontidao dos pods (1 = pronto)",
           "layout": { "column": 1, "row": 7, "width": 4, "height": 3 },
           "visualization": { "id": "viz.table" },
           "rawConfiguration": {
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM K8sPodSample SELECT latest(status) WHERE clusterName = 'oficina-k3s' AND status != 'Running' FACET podName",
+                "query": "FROM Metric SELECT latest(kube_pod_status_ready) WHERE k8s.cluster.name = 'oficina-k3s' AND condition = 'true' FACET pod",
                 "requiresGate": 11
               }
             ]
           }
         },
         {
-          "title": "Pressao de memoria e disco",
+          "title": "Condicoes ativas do node",
           "layout": { "column": 5, "row": 7, "width": 4, "height": 3 },
           "visualization": { "id": "viz.table" },
           "rawConfiguration": {
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM K8sNodeSample SELECT latest(condition.MemoryPressure), latest(condition.DiskPressure), latest(condition.Ready) WHERE clusterName = 'oficina-k3s' FACET nodeName",
+                "query": "FROM Metric SELECT latest(kube_node_status_condition) WHERE k8s.cluster.name = 'oficina-k3s' AND status = 'true' FACET node, condition",
                 "requiresGate": 11
               }
             ]
@@ -393,7 +393,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM InfrastructureEvent SELECT count(*) WHERE clusterName = 'oficina-k3s' FACET event.reason, event.message",
+                "query": "FROM Log SELECT count(*) WHERE k8s.cluster.name = 'oficina-k3s' AND k8s.event.reason IS NOT NULL FACET k8s.event.reason, k8s.object.name",
                 "requiresGate": 10
               }
             ]

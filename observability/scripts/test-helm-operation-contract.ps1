@@ -117,4 +117,32 @@ if ($violacoes[0].Capacity) {
     throw 'Replica faltando nao e diagnostico de capacidade: recomendaria t3.large sem a causa ser a instancia.'
 }
 
+# ---------------------------------------------------------------------------
+# Escape dentro dos scripts enviados ao node.
+#
+# Em string de aspas duplas o escape do PowerShell e a crase, nao a barra
+# invertida. Escrever \$(comando) nao produz texto literal: o PowerShell avalia a
+# subexpressao e o comando roda no runner do GitHub, nao na EC2. Ja aconteceu com
+# k3s, que existe so no node.
+# ---------------------------------------------------------------------------
+foreach ($arquivo in @('install-newrelic-collector.ps1', 'newrelic-common.ps1', 'provision-newrelic.ps1', 'validate-newrelic.ps1')) {
+    $caminho = Join-Path $PSScriptRoot $arquivo
+    $errosDeParse = $null
+    $arvore = [System.Management.Automation.Language.Parser]::ParseFile($caminho, [ref]$null, [ref]$errosDeParse)
+    if ($errosDeParse.Count -gt 0) {
+        throw "$arquivo nao parseia: $($errosDeParse[0].Message)"
+    }
+
+    $expansiveis = $arvore.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.ExpandableStringExpressionAst]
+        }, $true)
+
+    foreach ($texto in $expansiveis) {
+        if ($texto.Extent.Text -match '\\\$') {
+            throw ('{0} linha {1}: string de aspas duplas escapa com barra invertida. Em PowerShell o escape e a crase, entao a subexpressao seria avaliada no runner em vez de virar texto para o node.' -f $arquivo, $texto.Extent.StartLineNumber)
+        }
+    }
+}
+
 Write-Host 'Contrato Helm operation offline aprovado.'

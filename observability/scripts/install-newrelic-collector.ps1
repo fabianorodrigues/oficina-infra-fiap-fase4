@@ -434,8 +434,8 @@ k3s kubectl -n $($config.Namespace) get pods -o jsonpath='{range .items[*]}{.met
 echo '--- prontidao dos workloads do Collector'
 # A espera vem antes da contagem: um Pod ainda baixando imagem nao pode ser lido
 # como workload quebrado. Depois dela, replica faltando e falha de verdade.
-for alvo in \$(k3s kubectl -n $($config.Namespace) get daemonset,deployment -o name); do
-    k3s kubectl -n $($config.Namespace) rollout status "\$alvo" --timeout=3m >/dev/null 2>&1 || true
+for alvo in `$(k3s kubectl -n $($config.Namespace) get daemonset,deployment -o name); do
+    k3s kubectl -n $($config.Namespace) rollout status "`$alvo" --timeout=3m >/dev/null 2>&1 || true
 done
 k3s kubectl -n $($config.Namespace) get daemonset -o jsonpath='{range .items[*]}OFICINA_WORKLOAD daemonset/{.metadata.name} pronto={.status.numberReady} desejado={.status.desiredNumberScheduled}{"\n"}{end}'
 k3s kubectl -n $($config.Namespace) get deployment -o jsonpath='{range .items[*]}OFICINA_WORKLOAD deployment/{.metadata.name} pronto={.status.readyReplicas} desejado={.status.replicas}{"\n"}{end}'
