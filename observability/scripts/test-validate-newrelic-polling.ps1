@@ -73,6 +73,14 @@ if ($conteudo -match '\.PSObject\.Properties\s*\|') {
     throw 'validate-newrelic.ps1 varre PSObject.Properties por pipeline. Use Get-NrqlColumn para nao devolver $null.Value.'
 }
 
+# K8sNodeSample, K8sPodSample e K8sContainerSample vem do agente de
+# infraestrutura (nri-kubernetes), ausente deste chart. Este stack e OTel e
+# publica metricas dimensionais em Metric: consultar aqueles tipos reprova a
+# validacao com a coleta inteira funcionando.
+if ($conteudo -match '(?i)FROM\s+K8s\w*Sample') {
+    throw 'validate-newrelic.ps1 consulta K8s*Sample, que o nr-k8s-otel-collector nao produz. Use as metricas k8s.* em Metric.'
+}
+
 . (Join-Path $PSScriptRoot 'newrelic-common.ps1')
 
 $linha = [pscustomobject]@{ 'uniqueCount.service.instance.id' = 3; 'facet' = 'oficina-cadastro' }
