@@ -83,7 +83,10 @@ function Get-NestedImageValue {
 
 $configLines = Get-Content -LiteralPath $ConfigPath
 $officialPath = Join-Path $RepositoryRoot 'config/official.yml'
-$expectedKubectlRepository = 'rancher/kubectl'
+# O init container get-cpu-allocatable roda `sh -c` e edita a config com yq: a
+# imagem precisa de shell, kubectl e yq. rancher/kubectl nao tem shell e
+# derrubava o DaemonSet inteiro em CrashLoopBackOff.
+$expectedKubectlRepository = 'alpine/k8s'
 $expectedKubectlTag = $null
 
 if (-not (Test-Path -LiteralPath $officialPath)) {
@@ -92,7 +95,8 @@ if (-not (Test-Path -LiteralPath $officialPath)) {
 else {
     $officialLines = Get-Content -LiteralPath $officialPath
     $k3sVersion = Get-YamlScalar -Lines $officialLines -Key 'k3sVersion'
-    if ($k3sVersion -match '^(?<tag>v\d+\.\d+\.\d+)\+k3s\d+$') {
+    # alpine/k8s publica a tag sem o prefixo v: 1.35.6, e nao v1.35.6.
+    if ($k3sVersion -match '^v(?<tag>\d+\.\d+\.\d+)\+k3s\d+$') {
         $expectedKubectlTag = $Matches['tag']
     }
     else {
@@ -106,7 +110,7 @@ if ($configKubectlRepository -ne $expectedKubectlRepository) {
     Add-Failure "config/observability.yml images.kubectl.repository deve ser $expectedKubectlRepository (atual: $configKubectlRepository)."
 }
 if ($null -ne $expectedKubectlTag -and $configKubectlTag -ne $expectedKubectlTag) {
-    Add-Failure "config/observability.yml images.kubectl.tag deve acompanhar config/official.yml sem o sufixo +k3sN: $expectedKubectlTag (atual: $configKubectlTag)."
+    Add-Failure "config/observability.yml images.kubectl.tag deve acompanhar config/official.yml sem o prefixo v e sem o sufixo +k3sN: $expectedKubectlTag (atual: $configKubectlTag)."
 }
 
 # A chave `version` aparece em dois blocos (helm e chart), portanto a leitura e

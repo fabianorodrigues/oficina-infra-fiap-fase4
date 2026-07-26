@@ -47,9 +47,13 @@ images:
   collector:
     repository: newrelic/nrdot-collector
     tag: 1.19.0
+  # Precisa de shell, kubectl e yq: o init container do DaemonSet roda `sh -c` e
+  # edita a config com yq. rancher/kubectl nao tem shell e derrubava a coleta de
+  # node, pod e container. Tag imutavel casada com kubernetes.k3sVersion de
+  # config/official.yml, sem o prefixo v.
   kubectl:
-    repository: rancher/kubectl
-    tag: v1.35.6
+    repository: alpine/k8s
+    tag: 1.35.6
   kubeStateMetrics:
     repository: registry.k8s.io/kube-state-metrics/kube-state-metrics
     tag: v2.14.0

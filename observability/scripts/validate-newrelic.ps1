@@ -216,6 +216,7 @@ $script:MetricasK8s = @()
 Wait-ForSignal -Name 'CPU e memoria do node presentes' -Required -TimeoutOverrideSeconds 600 -Query @"
 FROM Metric SELECT uniques(metricName, 500)
 WHERE metricName LIKE 'k8s.%' OR metricName LIKE 'container.%' OR metricName LIKE 'kube_%'
+OR metricName LIKE 'node.%' OR metricName LIKE 'system.%'
 SINCE 30 minutes ago
 "@ -Predicate {
     param($rows)
@@ -237,8 +238,11 @@ SINCE 30 minutes ago
     $nomes = @($nomes | Sort-Object -Unique)
     $script:MetricasK8s = $nomes
 
-    $cpu = @($nomes | Where-Object { $_ -like 'k8s.node.*' -and $_ -match '(?i)cpu' })
-    $memoria = @($nomes | Where-Object { $_ -like 'k8s.node.*' -and $_ -match '(?i)mem' })
+    # O kubeletstats publica k8s.node.*; o processor metricsgeneration do chart
+    # acrescenta node.cpu.usage.percentage e node.memory.usage.percentage, que sao
+    # os nomes com a semantica percentual que as condicoes de alerta precisam.
+    $cpu = @($nomes | Where-Object { $_ -match '^(k8s\.)?node\.' -and $_ -match '(?i)cpu' })
+    $memoria = @($nomes | Where-Object { $_ -match '^(k8s\.)?node\.' -and $_ -match '(?i)mem' })
 
     [pscustomobject]@{
         Ok     = $cpu.Count -gt 0 -and $memoria.Count -gt 0
