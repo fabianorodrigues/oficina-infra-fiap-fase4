@@ -478,6 +478,22 @@ function Test-CapacityGate {
         }
     }
 
+    # Replica faltando depois da espera do rollout. Sem esta checagem a
+    # instalacao ja foi dada como concluida com o DaemonSet preso em
+    # Init:CrashLoopBackOff: o Collector nao coletava node, pod nem container, e o
+    # sintoma so aparecia na validacao, dez minutos depois e longe da causa.
+    foreach ($workload in [regex]::Matches($Text, '(?m)^OFICINA_WORKLOAD\s+(?<nome>\S+)\s+pronto=(?<pronto>\d*)\s+desejado=(?<desejado>\d*)\s*$')) {
+        $pronto = if ($workload.Groups['pronto'].Value) { [int]$workload.Groups['pronto'].Value } else { 0 }
+        $desejado = if ($workload.Groups['desejado'].Value) { [int]$workload.Groups['desejado'].Value } else { 0 }
+
+        if ($desejado -gt 0 -and $pronto -lt $desejado) {
+            $violations += [pscustomobject]@{
+                Capacity = $false
+                Message  = "$($workload.Groups['nome'].Value) com $pronto de $desejado replica(s) prontas apos a espera do rollout."
+            }
+        }
+    }
+
     return $violations
 }
 

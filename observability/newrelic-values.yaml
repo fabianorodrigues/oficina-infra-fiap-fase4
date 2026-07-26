@@ -29,12 +29,21 @@ images:
     repository: newrelic/nrdot-collector
     tag: 1.19.0
     pullPolicy: IfNotPresent
-  # O chart usa uma imagem auxiliar de kubectl. A tag acompanha a versao do K3s
-  # fixada em config/official.yml; bitnami/kubectl:1.31.4 deixou de existir no
-  # Docker Hub e quebra o init container do DaemonSet.
+  # Imagem do init container get-cpu-allocatable do DaemonSet. Ela nao roda
+  # kubectl direto: o chart executa `sh -c` e edita a config com `yq`, entao a
+  # imagem precisa de shell, kubectl E yq.
+  #
+  # O default do chart e bitnami/kubectl:latest, proibido aqui por ser tag movel,
+  # e hoje o Docker Hub so publica `latest` nesse repositorio. rancher/kubectl
+  # tambem nao serve: nao tem shell, e o init container morria em
+  # CrashLoopBackOff com `exec: "sh": executable file not found in $PATH`, o que
+  # derrubava toda a coleta de node, pod e container.
+  #
+  # alpine/k8s traz os tres e publica tag imutavel casada com a versao do K3s de
+  # config/official.yml (sem o prefixo v).
   kubectl:
-    repository: rancher/kubectl
-    tag: v1.35.6
+    repository: alpine/k8s
+    tag: 1.35.6
     pullPolicy: IfNotPresent
 
 receivers:
