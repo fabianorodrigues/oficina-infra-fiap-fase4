@@ -1,10 +1,14 @@
 # Black-box smoke test for the public API Gateway entrypoint. HTTP only, no AWS
 # calls, no secrets. Uses synthetic data. Exits non-zero on any failed assertion.
+# Health probes retry briefly because API Gateway/VPC Link/ALB can return
+# transient 5xx responses immediately after a fresh deployment.
 # Targets PowerShell 7 (pwsh, uses -SkipHttpErrorCheck).
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$BaseUrl,
     [int]$TimeoutSeconds = 15,
+    [ValidateRange(1, 30)][int]$HealthMaxAttempts = 6,
+    [ValidateRange(1, 120)][int]$HealthRetryDelaySeconds = 10,
     [string]$ConfigPath
 )
 
@@ -49,12 +53,55 @@ function Assert-Status {
     else { Add-Failure "$Label -> $Actual (expected $($Expected -join '/'))" }
 }
 
+function Test-TransientStatus {
+    param([int]$StatusCode)
+    return @(0, 408, 425, 429, 500, 502, 503, 504) -contains $StatusCode
+}
+
+function Assert-HealthStatus {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $lastCode = 0
+    $lastError = ''
+    $attemptsUsed = 0
+
+    for ($attempt = 1; $attempt -le $HealthMaxAttempts; $attempt++) {
+        $attemptsUsed = $attempt
+        try {
+            $lastCode = Invoke-Http -Method 'GET' -Path $Path
+            $lastError = ''
+        }
+        catch {
+            $lastCode = 0
+            $lastError = $_.Exception.Message
+        }
+
+        if ($lastCode -eq 200) {
+            if ($attempt -eq 1) { Add-Pass "GET $Path -> 200" }
+            else { Add-Pass "GET $Path -> 200 (attempt $attempt/$HealthMaxAttempts)" }
+            return
+        }
+
+        if (-not (Test-TransientStatus $lastCode) -or $attempt -eq $HealthMaxAttempts) { break }
+
+        $detail = if ($lastCode -eq 0) { "exception: $lastError" } else { "status $lastCode" }
+        Write-Host "  RETRY GET $Path -> $detail (attempt $attempt/$HealthMaxAttempts); waiting ${HealthRetryDelaySeconds}s"
+        Start-Sleep -Seconds $HealthRetryDelaySeconds
+    }
+
+    if ($lastCode -eq 0) {
+        Add-Failure "GET $Path -> exception '$lastError' (expected 200 after $attemptsUsed attempt(s))"
+    }
+    else {
+        Add-Failure "GET $Path -> $lastCode (expected 200 after $attemptsUsed attempt(s))"
+    }
+}
+
 Write-Host "Smoke testing $base"
 
 # Health (public, expected 2xx)
 foreach ($t in @('cadastro', 'estoque', 'ordens')) {
-    $code = Invoke-Http -Method 'GET' -Path "/health/$t"
-    Assert-Status "GET /health/$t" $code @(200)
+    Assert-HealthStatus -Path "/health/$t"
 }
 
 # Protected routes reject unauthenticated and malformed tokens
