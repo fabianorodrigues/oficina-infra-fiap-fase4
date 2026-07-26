@@ -161,6 +161,16 @@ jobs:
         shell: pwsh
         run: ./observability/scripts/test-nerdgraph-query-contract.ps1
 
+      - name: Test Helm operation contract
+        shell: pwsh
+        run: ./observability/scripts/test-helm-operation-contract.ps1
+
+      - name: Test Helm operation shell contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh observability/scripts/test-helm-operation-shell.sh
+
       - name: Configure AWS credentials
         if: ${{ steps.config.outputs.aws_configured == 'true' }}
         uses: aws-actions/configure-aws-credentials@v5
