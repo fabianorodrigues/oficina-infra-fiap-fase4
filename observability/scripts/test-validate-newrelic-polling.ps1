@@ -58,4 +58,60 @@ if ($optionalBlock -notmatch 'return \$true') {
     throw 'Caminho opcional deve retornar sucesso logico para nao reprovar sinais nao obrigatorios.'
 }
 
+# ---------------------------------------------------------------------------
+# Leitura de resultado NRQL.
+#
+# Predicado que le coluna direto do objeto quebra sob StrictMode quando a coluna
+# nao vem (FACET sem resultado, agregacao sem alias). O erro substituia o
+# diagnostico do sinal ausente por "The property ... cannot be found".
+# ---------------------------------------------------------------------------
+$conteudo = Get-Content -LiteralPath $scriptPath -Raw
+if ($conteudo -match '\$_\.facet') {
+    throw 'validate-newrelic.ps1 le $_.facet diretamente. Use Get-NrqlValue: coluna ausente e erro terminante sob StrictMode.'
+}
+if ($conteudo -match '\.PSObject\.Properties\s*\|') {
+    throw 'validate-newrelic.ps1 varre PSObject.Properties por pipeline. Use Get-NrqlColumn para nao devolver $null.Value.'
+}
+
+. (Join-Path $PSScriptRoot 'newrelic-common.ps1')
+
+$linha = [pscustomobject]@{ 'uniqueCount.service.instance.id' = 3; 'facet' = 'oficina-cadastro' }
+
+if ((Get-NrqlValue -Row $linha -Name 'facet') -ne 'oficina-cadastro') {
+    throw 'Get-NrqlValue nao devolveu a coluna existente.'
+}
+if ($null -ne (Get-NrqlValue -Row $linha -Name 'inexistente')) {
+    throw 'Get-NrqlValue deveria devolver $null para coluna ausente.'
+}
+if ($null -ne (Get-NrqlValue -Row $null -Name 'facet')) {
+    throw 'Get-NrqlValue deveria tolerar linha nula.'
+}
+if ((Get-NrqlColumn -Row $linha -Pattern '*uniqueCount*') -ne 3) {
+    throw 'Get-NrqlColumn nao resolveu a coluna por padrao.'
+}
+if ($null -ne (Get-NrqlColumn -Row $linha -Pattern '*latest*')) {
+    throw 'Get-NrqlColumn deveria devolver $null quando nenhuma coluna casa.'
+}
+if ([int](Get-NrqlColumn -Row $null -Pattern '*count*') -ne 0) {
+    throw 'Coluna ausente precisa converter para zero sem erro.'
+}
+
+# ---------------------------------------------------------------------------
+# Publicacao do resumo.
+#
+# A validacao publica o titulo antes de montar a tabela: corpo vazio e uso
+# legitimo e nao pode reprovar o passo por binding de parametro.
+# ---------------------------------------------------------------------------
+$summaryAnterior = $env:GITHUB_STEP_SUMMARY
+$env:GITHUB_STEP_SUMMARY = ''
+try {
+    Write-Summary -Title 'Validacao da observabilidade' -Body @() | Out-Null
+}
+catch {
+    throw "Write-Summary reprovou corpo vazio: $($_.Exception.Message)"
+}
+finally {
+    $env:GITHUB_STEP_SUMMARY = $summaryAnterior
+}
+
 Write-Host 'Contrato de polling New Relic aprovado.'
