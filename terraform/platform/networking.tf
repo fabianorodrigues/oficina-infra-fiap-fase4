@@ -26,6 +26,7 @@ resource "aws_vpc_security_group_egress_rule" "alb_to_node_ports" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "alb_from_k3s_node_http" {
+  #checkov:skip=CKV_AWS_260:Port 80 is allowed only from the K3s node security group via referenced_security_group_id, not from a public CIDR.
   security_group_id            = aws_security_group.alb.id
   description                  = "HTTP from K3s node for internal service calls"
   ip_protocol                  = "tcp"
