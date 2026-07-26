@@ -1,7 +1,7 @@
 #!/bin/sh
 # Post-renderer do Helm com responsabilidade unica:
 #
-#   Deployment nr-otel-gateway -> spec.strategy.type=Recreate
+#   Deployment nr-otel-nr-k8s-otel-collector-deployment -> spec.strategy.type=Recreate
 #
 # Por que post-renderer e nao patch depois do install: se o chart renderizar
 # RollingUpdate, o Helm sobe um segundo gateway antes do patch chegar. Num
@@ -18,7 +18,7 @@
 set -eu
 
 TARGET_KIND='Deployment'
-TARGET_NAME='nr-otel-gateway'
+TARGET_NAME='nr-otel-nr-k8s-otel-collector-deployment'
 
 input="$(mktemp)"
 output="$(mktemp)"

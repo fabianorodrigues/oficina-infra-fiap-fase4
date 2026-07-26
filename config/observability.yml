@@ -8,10 +8,11 @@
 newRelic:
   namespace: newrelic
   release: nr-otel
-  # fullnameOverride define o nome do Service consumido pelas tres APIs. Trocar
-  # este valor exige atualizar os ConfigMaps dos tres repositorios de servico.
-  fullnameOverride: nr-otel
-  gatewayService: nr-otel-gateway
+  # Nomes renderizados pelo chart nr-k8s-otel-collector 0.14.0. gatewayDeployment
+  # recebe strategy Recreate via post-renderer; gatewayService e o DNS consumido
+  # pelas tres APIs.
+  gatewayDeployment: nr-otel-nr-k8s-otel-collector-deployment
+  gatewayService: nr-k8s-otel-collector-gateway
   otlpGrpcPort: 4317
   otlpHttpPort: 4318
   clusterName: oficina-k3s
@@ -44,7 +45,7 @@ chart:
 # sobrescrever aqui, o cluster mudaria de artefato sem mudanca de codigo.
 images:
   collector:
-    repository: newrelic/nrdot-collector-k8s
+    repository: newrelic/nrdot-collector
     tag: 1.19.0
   kubectl:
     repository: bitnami/kubectl

@@ -273,7 +273,7 @@ done
 | Sinal | Onde |
 |---|---|
 | Logs estruturados das APIs | JSON no stdout dos containers → receiver `filelog` do Collector → New Relic |
-| Métricas técnicas e de negócio | OTLP gRPC das APIs → `nr-otel-gateway.newrelic.svc.cluster.local:4317` → New Relic |
+| Métricas técnicas e de negócio | OTLP gRPC das APIs → `nr-k8s-otel-collector-gateway.newrelic.svc.cluster.local:4317` → New Relic |
 | Traces distribuídos | OTLP gRPC, propagação W3C por HTTP e por SQS |
 | Sinais do K3s | `kubeletstats`, `hostmetrics`, `k8s_events` e kube-state-metrics, pelo Collector |
 | Dashboard, alertas e uptime | `FIAP Oficina - Visão Geral`, policy `FIAP Oficina - Produção` e três Synthetic Ping Monitors |

@@ -64,11 +64,19 @@ $chartVersionValue = $null
 $helmSha = $null
 $helmMajor = $null
 $historyMax = $null
+$newRelicBlock = $false
+$gatewayDeployment = $null
+$gatewayService = $null
 foreach ($line in $configLines) {
-    if ($line -match '^helm:\s*$') { $helmBlock = $true; $chartBlock = $false; continue }
-    if ($line -match '^chart:\s*$') { $chartBlock = $true; $helmBlock = $false; continue }
-    if ($line -match '^\S') { $helmBlock = $false; $chartBlock = $false }
+    if ($line -match '^newRelic:\s*$') { $newRelicBlock = $true; $helmBlock = $false; $chartBlock = $false; continue }
+    if ($line -match '^helm:\s*$') { $newRelicBlock = $false; $helmBlock = $true; $chartBlock = $false; continue }
+    if ($line -match '^chart:\s*$') { $newRelicBlock = $false; $chartBlock = $true; $helmBlock = $false; continue }
+    if ($line -match '^\S') { $newRelicBlock = $false; $helmBlock = $false; $chartBlock = $false }
 
+    if ($newRelicBlock) {
+        if ($line -match '^\s+gatewayDeployment:\s*(.+?)\s*$') { $gatewayDeployment = $Matches[1].Trim() }
+        if ($line -match '^\s+gatewayService:\s*(.+?)\s*$') { $gatewayService = $Matches[1].Trim() }
+    }
     if ($helmBlock) {
         if ($line -match '^\s+version:\s*(.+?)\s*$') { $helmVersionValue = $Matches[1].Trim() }
         if ($line -match '^\s+majorVersion:\s*(.+?)\s*$') { $helmMajor = $Matches[1].Trim() }
@@ -85,6 +93,8 @@ if ([string]::IsNullOrWhiteSpace($helmVersionValue)) { Add-Failure 'helm.version
 if ($helmMajor -ne '3') { Add-Failure "helm.majorVersion deve ser 3: o Helm 4 migrou post-renderer para plugins e quebraria post-render-newrelic.sh (atual: $helmMajor)." }
 if ([string]::IsNullOrWhiteSpace($helmSha) -or $helmSha -notmatch '^[0-9a-f]{64}$') { Add-Failure 'helm.sha256 ausente ou fora do formato SHA-256.' }
 if ($historyMax -ne '2') { Add-Failure "helm.historyMax deve ser 2 para alinhar o historico do Helm com a retencao de Secrets (atual: $historyMax)." }
+if ($gatewayDeployment -ne 'nr-otel-nr-k8s-otel-collector-deployment') { Add-Failure "newRelic.gatewayDeployment deve refletir o Deployment renderizado pelo chart 0.14.0 (esperado: nr-otel-nr-k8s-otel-collector-deployment; atual: $gatewayDeployment)." }
+if ($gatewayService -ne 'nr-k8s-otel-collector-gateway') { Add-Failure "newRelic.gatewayService deve refletir o Service renderizado pelo chart 0.14.0 (esperado: nr-k8s-otel-collector-gateway; atual: $gatewayService)." }
 
 # ---------------------------------------------------------------------------
 # Fonte unica: a versao do chart e a do Helm nao podem aparecer fora do config.
@@ -124,6 +134,31 @@ else {
     $valuesLines = Get-Content -LiteralPath $valuesPath
     $valuesRaw = $valuesLines -join "`n"
 
+    function Get-ImageTag {
+        param([Parameter(Mandatory = $true)][string]$ImageName)
+
+        $inImages = $false
+        $inImage = $false
+        foreach ($line in $valuesLines) {
+            if ($line -match '^images:\s*$') {
+                $inImages = $true
+                $inImage = $false
+                continue
+            }
+            if ($inImages -and $line -match '^\S') { break }
+            if ($inImages -and $line -match "^\s{2}$([regex]::Escape($ImageName)):\s*$") {
+                $inImage = $true
+                continue
+            }
+            if ($inImage -and $line -match '^\s{2}\S') { $inImage = $false }
+            if ($inImage -and $line -match '^\s{4}tag:\s*(.+?)\s*$') {
+                return $Matches[1].Trim().Trim('"').Trim("'")
+            }
+        }
+
+        return $null
+    }
+
     if ($valuesLines | Select-String -Pattern '^\s*licenseKey\s*:' -Quiet) {
         Add-Failure 'newrelic-values.yaml declara licenseKey. O arquivo e versionado e nao pode conter secret.'
     }
@@ -136,6 +171,26 @@ else {
     if ($valuesRaw -match '(?m)^\s*tag:\s*["'']?latest["'']?\s*$') {
         Add-Failure 'newrelic-values.yaml usa tag latest. Toda imagem precisa de tag fixa.'
     }
+    if ($valuesRaw -match '(?m)^fullnameOverride:\s*') {
+        Add-Failure 'newrelic-values.yaml declara fullnameOverride no topo. O chart 0.14.0 ignora isso para o Service do gateway e mascara nomes inexistentes.'
+    }
+    if ($valuesRaw -match '(?m)^image:\s*$') {
+        Add-Failure 'newrelic-values.yaml declara image: no topo. O chart 0.14.0 usa images.collector; image: seria ignorado.'
+    }
+    if ($valuesRaw -match '(?m)^kubectl:\s*$') {
+        Add-Failure 'newrelic-values.yaml declara kubectl: no topo. O chart 0.14.0 usa images.kubectl; kubectl.image seria ignorado.'
+    }
+    if ($valuesRaw -match 'newrelic/nrdot-collector-k8s') {
+        Add-Failure 'newrelic-values.yaml usa newrelic/nrdot-collector-k8s, imagem depreciada e indisponivel para 1.19.0. Use newrelic/nrdot-collector.'
+    }
+    if ($valuesRaw -notmatch 'repository:\s*newrelic/nrdot-collector\b') {
+        Add-Failure 'newrelic-values.yaml nao fixa images.collector.repository=newrelic/nrdot-collector.'
+    }
+    if ($valuesRaw -notmatch '(?m)^images:\s*$') {
+        Add-Failure 'newrelic-values.yaml nao declara images:. collector/kubectl precisam ser fixados nas chaves suportadas pelo chart.'
+    }
+    if ((Get-ImageTag -ImageName 'collector') -ne '1.19.0') { Add-Failure 'newrelic-values.yaml nao fixa images.collector.tag=1.19.0.' }
+    if ((Get-ImageTag -ImageName 'kubectl') -ne '1.31.4') { Add-Failure 'newrelic-values.yaml nao fixa images.kubectl.tag=1.31.4.' }
     if ($valuesRaw -notmatch 'updateStrategy:\s*Recreate') {
         Add-Failure 'newrelic-values.yaml nao define kube-state-metrics.updateStrategy=Recreate. O KSM vem do values, nao do post-renderer.'
     }

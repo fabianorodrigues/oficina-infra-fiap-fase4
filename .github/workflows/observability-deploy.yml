@@ -208,7 +208,7 @@ jobs:
           set -eu
           export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
           export PATH="$PATH:/usr/local/bin"
-          alvo="nr-otel-gateway.newrelic.svc.cluster.local"
+          alvo="nr-k8s-otel-collector-gateway.newrelic.svc.cluster.local"
           pod="$(k3s kubectl -n NAMESPACE_PLACEHOLDER get pods -l app.kubernetes.io/component=api \
             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
           if [ -z "$pod" ]; then

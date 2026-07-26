@@ -241,7 +241,7 @@ k3s kubectl -n $($config.Namespace) get secret $secretName -o name
     $previousRevisionCheck = if ($operation.Kind -eq 'atualizacao') {
         @"
 echo '--- manifesto da revisao que servira de rollback'
-if ! helm get manifest $($config.Release) --namespace $($config.Namespace) --revision $($operation.CurrentRevision) | grep -A2 'name: $($config.GatewayService)' | grep -q 'Recreate' ; then
+if ! helm get manifest $($config.Release) --namespace $($config.Namespace) --revision $($operation.CurrentRevision) | grep -A2 'name: $($config.GatewayDeployment)' | grep -q 'Recreate' ; then
     echo 'AVISO: a revisao atual nao tem Recreate no gateway. O rollback restauraria RollingUpdate.' >&2
 fi
 "@
@@ -286,7 +286,7 @@ if grep -hoE 'image:[[:space:]]*\S+:latest' "`$work/rendered.yaml"; then
 fi
 
 echo '--- strategy no gateway'
-grep -A3 'name: $($config.GatewayService)' "`$work/rendered.yaml" | grep -q 'Recreate' || {
+grep -A3 'name: $($config.GatewayDeployment)' "`$work/rendered.yaml" | grep -q 'Recreate' || {
     echo 'Gateway sem strategy Recreate apos o post-renderer.' >&2
     exit 1
 }
