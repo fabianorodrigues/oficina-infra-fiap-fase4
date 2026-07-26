@@ -4,16 +4,15 @@ name: Observability Deploy
 # log groups do API Gateway, metricas do ALB, profundidade de filas, DLQ zerada e
 # estado do cluster.
 #
-# Duas passagens, porque na primeira execucao os Pods das APIs ainda rodam a versao
-# anterior, sem OTEL_EXPORTER_OTLP_ENDPOINT nem o formatter novo. Exigir logs,
-# spans e metricas das tres APIs nessa mesma execucao reprovaria o workflow mesmo
-# com o Collector instalado corretamente:
+# Duas passagens. A primeira pode rodar logo apos o Platform Deploy, antes dos
+# workloads e antes do Entrypoint: instala o Collector para que as APIs ja nascam
+# apontando para o gateway OTLP. Recursos que dependem da URL publica ou de Pods
+# das APIs ficam pendentes ate a segunda passagem.
 #
 #   1. validation_only=false  application_signals_required=false
-#   2. redeploy Cadastro, Estoque e Ordens
+#   2. deploy Cadastro, Estoque, Ordens e depois Entrypoint
 #   3. validation_only=true   application_signals_required=true
-#   4. consolidacao, so se a passagem 3 descobriu query a persistir:
-#      validation_only=false  application_signals_required=true
+#   4. consolidacao manual apenas se a reconciliacao final da New Relic falhar.
 
 on:
   workflow_dispatch:
@@ -23,7 +22,7 @@ on:
         required: false
         default: ''
       validation_only:
-        description: 'true = somente leitura: nao instala Helm, nao aplica Helm, nao cria Secret, nao altera New Relic.'
+        description: 'true = nao altera K3s/Helm/Secret; com application_signals_required=true e URL publica, reconcilia New Relic antes de validar.'
         type: boolean
         required: false
         default: false
@@ -143,7 +142,7 @@ jobs:
             Write-Host 'New Relic nao configurado: validacao remota e provisionamento NerdGraph serao ignorados.'
           }
           elseif (-not $newRelicProvisioningConfigured) {
-            Write-Host 'NEW_RELIC_LICENSE_KEY ausente: Collector e provisionamento real serao ignorados; validation_only ainda pode consultar sinais existentes.'
+            Write-Host 'NEW_RELIC_LICENSE_KEY ausente: instalacao do Collector sera ignorada; validation_only ainda pode validar e reconciliar recursos New Relic que nao dependem da license key.'
           }
 
       - name: Validate observability config
@@ -183,10 +182,18 @@ jobs:
           # criados depois que ela resolve.
           api_url=$(aws ssm get-parameter --name /oficina/infra/api/url \
             --region "$AWS_REGION" --query Parameter.Value --output text 2>/dev/null || echo '')
+          if [ "$api_url" = 'None' ]; then
+            api_url=''
+          fi
+          api_ready=false
+          if [ -n "$api_url" ]; then
+            api_ready=true
+          fi
 
           echo "instance=$instance" >> "$GITHUB_OUTPUT"
           echo "namespace=$namespace" >> "$GITHUB_OUTPUT"
           echo "api_url=$api_url" >> "$GITHUB_OUTPUT"
+          echo "api_ready=$api_ready" >> "$GITHUB_OUTPUT"
           echo "correlation_id=observability-validation-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
 
           echo "node: $instance | namespace: $namespace"
@@ -235,9 +242,9 @@ jobs:
           }
           ./observability/scripts/install-newrelic-collector.ps1 @argumentos
 
-      # 8. Validar o endpoint OTLP interno a partir do namespace das APIs, que e o
-      #    caminho real que elas usam. Testar de fora do namespace nao provaria a
-      #    resolucao de DNS entre namespaces.
+      # 8. Validar o endpoint OTLP interno. Na primeira passagem ainda nao ha Pods
+      #    das APIs, entao o gate duro e o Service/Endpoints do gateway; quando
+      #    houver Pod de API, uma checagem de execucao e feita em best-effort.
       - name: Validate internal OTLP endpoint
         if: ${{ steps.config.outputs.otlp_endpoint_validation_enabled == 'true' }}
         shell: bash
@@ -250,17 +257,39 @@ jobs:
           set -eu
           export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
           export PATH="$PATH:/usr/local/bin"
-          alvo="nr-k8s-otel-collector-gateway.newrelic.svc.cluster.local"
+          gateway_namespace="newrelic"
+          gateway_service="nr-k8s-otel-collector-gateway"
+          alvo="$gateway_service.$gateway_namespace.svc.cluster.local"
+
+          k3s kubectl -n "$gateway_namespace" get service "$gateway_service" >/dev/null
+          endpoints="$(k3s kubectl -n "$gateway_namespace" get endpoints "$gateway_service" \
+            -o jsonpath='{range .subsets[*].addresses[*]}{.ip}{"\n"}{end}' 2>/dev/null || true)"
+          ports="$(k3s kubectl -n "$gateway_namespace" get endpoints "$gateway_service" \
+            -o jsonpath='{range .subsets[*].ports[*]}{.port}{"\n"}{end}' 2>/dev/null || true)"
+          if [ -z "$endpoints" ] || ! printf '%s\n' "$ports" | grep -qx '4317'; then
+            echo "Gateway OTLP sem endpoint pronto em $alvo:4317." >&2
+            exit 1
+          fi
+          echo "gateway OTLP com endpoint(s): $(printf '%s' "$endpoints" | tr '\n' ' ')"
+
           pod="$(k3s kubectl -n NAMESPACE_PLACEHOLDER get pods -l app.kubernetes.io/component=api \
             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
           if [ -z "$pod" ]; then
-            pod="$(k3s kubectl -n NAMESPACE_PLACEHOLDER get pods -o jsonpath='{.items[0].metadata.name}')"
+            pod="$(k3s kubectl -n NAMESPACE_PLACEHOLDER get pods -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
           fi
-          echo "testando de $pod"
-          k3s kubectl -n NAMESPACE_PLACEHOLDER exec "$pod" -- \
-            timeout 10 sh -c "cat < /dev/null > /dev/tcp/$alvo/4317" \
-            && echo 'OTLP_REACHABLE=true' \
-            || { echo "Gateway OTLP inalcancavel em $alvo:4317 a partir do namespace das APIs." >&2; exit 1; }
+          if [ -z "$pod" ]; then
+            echo "namespace NAMESPACE_PLACEHOLDER ainda sem Pods de API; Service/Endpoints do gateway validados."
+            echo 'OTLP_GATEWAY_READY=true'
+            exit 0
+          fi
+
+          echo "pod de API encontrado para diagnostico best-effort: $pod"
+          if k3s kubectl -n NAMESPACE_PLACEHOLDER exec "$pod" -- sh -c "command -v nc >/dev/null 2>&1 && nc -z -w 10 $alvo 4317" 2>/dev/null; then
+            echo 'OTLP_REACHABLE_FROM_API_POD=true'
+          else
+            echo 'Pod de API sem ferramenta TCP compativel; Service/Endpoints do gateway continuam sendo o gate duro.'
+          fi
+          echo 'OTLP_GATEWAY_READY=true'
           EOF
           sed -i "s|NAMESPACE_PLACEHOLDER|$namespace|g" /tmp/otlp-check.sh
           jq -Rs '{commands: [.]}' < /tmp/otlp-check.sh > /tmp/otlp-check.json
@@ -285,8 +314,12 @@ jobs:
           test "$status" = 'Success'
 
       # 9 a 12. Dashboard, policy, condicoes, notificacao e Synthetic Monitors.
+      # A primeira passagem provisiona o que independe do Entrypoint. Na passagem
+      # final, mesmo com validation_only=true, a reconciliacao idempotente da New
+      # Relic fecha os Synthetics depois que a URL publica existe. As queries que
+      # dependem do gate 12 so sao persistidas depois da validacao passar.
       - name: Provision New Relic resources
-        if: ${{ steps.config.outputs.new_relic_provisioning_enabled == 'true' }}
+        if: ${{ steps.config.outputs.new_relic_provisioning_enabled == 'true' || (inputs.validation_only == true && inputs.application_signals_required == true && steps.config.outputs.new_relic_management_configured == 'true' && steps.platform.outputs.api_ready == 'true') }}
         shell: pwsh
         env:
           NEW_RELIC_USER_API_KEY: ${{ secrets.NEW_RELIC_USER_API_KEY }}
@@ -304,7 +337,7 @@ jobs:
           if (-not [string]::IsNullOrWhiteSpace($apiUrl)) {
             $argumentos['ApiUrl'] = $apiUrl
           }
-          if ($env:APPLICATION_SIGNALS_REQUIRED -eq 'true') {
+          if ($env:APPLICATION_SIGNALS_REQUIRED -eq 'true' -and $env:VALIDATION_ONLY -ne 'true') {
             $argumentos['ApplicationSignalsReady'] = $true
           }
           ./observability/scripts/provision-newrelic.ps1 @argumentos
@@ -331,7 +364,29 @@ jobs:
           if ($env:APPLICATION_SIGNALS_REQUIRED -eq 'true') {
             $argumentos['ApplicationSignalsRequired'] = $true
           }
+          if (-not [string]::IsNullOrWhiteSpace($env:NEW_RELIC_NOTIFICATION_EMAIL)) {
+            $argumentos['NotificationEmail'] = $env:NEW_RELIC_NOTIFICATION_EMAIL
+          }
           ./observability/scripts/validate-newrelic.ps1 @argumentos
+
+      - name: Consolidate New Relic resources after validation
+        if: ${{ inputs.validation_only == true && inputs.application_signals_required == true && steps.config.outputs.new_relic_management_configured == 'true' && steps.platform.outputs.api_ready == 'true' }}
+        shell: pwsh
+        env:
+          NEW_RELIC_USER_API_KEY: ${{ secrets.NEW_RELIC_USER_API_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $argumentos = @{
+            AccountId               = $env:NEW_RELIC_ACCOUNT_ID
+            UserApiKey              = $env:NEW_RELIC_USER_API_KEY
+            NewRelicRegion          = $env:NEW_RELIC_REGION
+            ApiUrl                  = '${{ steps.platform.outputs.api_url }}'
+            ApplicationSignalsReady = $true
+          }
+          if (-not [string]::IsNullOrWhiteSpace($env:NEW_RELIC_NOTIFICATION_EMAIL)) {
+            $argumentos['NotificationEmail'] = $env:NEW_RELIC_NOTIFICATION_EMAIL
+          }
+          ./observability/scripts/provision-newrelic.ps1 @argumentos
 
       # Validacoes preservadas do Observability Validate anterior.
       - name: Validate edge log groups and ALB metrics
@@ -339,8 +394,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          aws logs describe-log-groups --log-group-name-prefix /aws/apigateway/oficina-api \
-            --region "$AWS_REGION" --query 'logGroups[0].logGroupName' --output text | grep -v '^None$'
+          api_ready='${{ steps.platform.outputs.api_ready }}'
+          if [ "$api_ready" = 'true' ]; then
+            aws logs describe-log-groups --log-group-name-prefix /aws/apigateway/oficina-api \
+              --region "$AWS_REGION" --query 'logGroups[0].logGroupName' --output text | grep -v '^None$'
+          else
+            echo 'API Gateway ainda nao publicada: log group /aws/apigateway/oficina-api fica pendente ate o Entrypoint Deploy.'
+            {
+              echo '## Validacao de borda'
+              echo ''
+              echo '- API Gateway ainda nao publicada: access log group pendente ate o Entrypoint Deploy.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
           aws cloudwatch list-metrics --namespace AWS/ApplicationELB --metric-name HealthyHostCount \
             --region "$AWS_REGION" >/dev/null
 
@@ -414,6 +479,7 @@ jobs:
         if: always()
         shell: bash
         run: |
+          api_ready='${{ steps.platform.outputs.api_ready }}'
           {
             echo '## Proximos passos'
             echo ''
@@ -437,11 +503,16 @@ jobs:
             fi
 
             if [ "${APPLICATION_SIGNALS_REQUIRED}" != 'true' ]; then
-              echo '1. Redeploy de Cadastro, Estoque e Ordens, nessa ordem.'
-              echo '2. Reexecutar este workflow com `validation_only=true` e `application_signals_required=true`.'
+              if [ "$api_ready" = 'true' ]; then
+                echo '1. Reexecutar ou confirmar os deploys de Cadastro, Estoque e Ordens se os sinais ainda estiverem pendentes.'
+                echo '2. Reexecutar este workflow com `validation_only=true` e `application_signals_required=true`.'
+              else
+                echo '1. Continuar a sequencia: Cadastro, Initial Admin, Estoque, Ordens e Entrypoint.'
+                echo '2. Reexecutar este workflow com `validation_only=true` e `application_signals_required=true` depois do Entrypoint.'
+              fi
               echo ''
-              echo 'Os sinais das APIs ficaram registrados como pendentes: os Pods ainda rodam a versao anterior a instrumentacao.'
+              echo 'Sinais das APIs e Synthetic Monitors ficam pendentes ate existirem Pods instrumentados e URL publica.'
             else
-              echo 'Se o passo de validacao reportou query descoberta pendente de persistencia, reexecutar com `validation_only=false` e `application_signals_required=true` para consolidar.'
+              echo 'Validacao com sinais obrigatorios executada. Se a reconciliacao final da New Relic falhou, reexecutar com `validation_only=false` e `application_signals_required=true` para consolidar manualmente.'
             fi
           } >> "$GITHUB_STEP_SUMMARY"

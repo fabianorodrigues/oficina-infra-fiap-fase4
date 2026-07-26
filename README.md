@@ -49,14 +49,18 @@ A **Oficina** é uma plataforma de gestão de oficina mecânica implantada na AW
 | **2** | **oficina-infra** | **Platform Deploy** | `APPLY` |
 | 3 | oficina-infra-db | Database Bootstrap (estrutura) | `BOOTSTRAP` |
 | 4 | oficina-auth-lambda | Auth Deploy | `DEPLOY` |
+| 4.1 | oficina-infra | Observability Deploy (primeira passagem opcional) | `DEPLOY` |
 | 5 | oficina-cadastro | Cadastro Deploy | `DEPLOY` |
 | 5.1 | oficina-infra-db | Initial Admin Provision | `PROVISION_ADMIN` |
 | 6 | oficina-estoque | Estoque Deploy | `DEPLOY` |
 | 7 | oficina-ordens-servico | Ordens Deploy | `DEPLOY` |
 | **8** | **oficina-infra** | **Entrypoint Deploy** | `APPLY` |
+| 8.1 | oficina-infra | Observability Deploy (validação opcional) | — |
 | 9 | oficina-ordens-servico | Collection Postman (execução manual) | — |
 
 As etapas 6 e 7 não dependem do admin inicial e podem rodar em paralelo se desejado; a numeração indica a ordem recomendada. A etapa **5.1** é obrigatória no primeiro provisionamento do ambiente e opcional em redeploys quando o admin já existe. Ela cria a credencial exigida pela etapa 9 e está documentada em [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4#etapa-51-admin-inicial).
+
+A etapa **4.1** é opcional, mas recomendada quando a New Relic está configurada: ela instala o Collector antes dos Pods das APIs nascerem, então Cadastro, Estoque e Ordens já sobem apontando para o gateway OTLP interno. Nessa passagem ainda não existem Pods das APIs nem URL pública; Synthetic Monitors, access log da API Gateway e sinais de aplicação ficam registrados como pendentes até a etapa **8.1**.
 
 > [!IMPORTANT]
 > O **Platform Deploy** (etapa 2) provisiona a EC2 com K3s, o ALB e os *target groups*, mas **não cria os workloads** — cada serviço se registra no seu *target group* ao ser publicado nas etapas 5 a 7. O **Entrypoint Deploy** (etapa 8) valida a saúde de cada destino antes de aplicar, por isso só roda **depois** das etapas 4 a 7.
@@ -199,9 +203,11 @@ Valida o ALB da plataforma (interno, listener HTTP, *target groups*) e as Lambda
 
 **Actions → Observability Deploy → Run workflow**
 
-Fora da sequência numerada, executável após a etapa 8. Quando AWS e New Relic
-estão configurados, instala o Collector da New Relic no K3s, provisiona
-dashboard, alertas e os três Synthetic Monitors, e valida os sinais que chegaram.
+Executável em duas janelas da sequência: uma primeira passagem opcional antes dos
+serviços, e uma validação completa depois do Entrypoint. Quando AWS e New Relic
+estão configurados, instala o Collector da New Relic no K3s, provisiona dashboard,
+policy, alertas já validáveis e, depois que a URL pública existir, os três
+Synthetic Monitors.
 Quando a configuração está ausente, o workflow vira no-op remoto: roda apenas as
 validações estáticas e o contrato do post-renderer, sem criar Secret, sem aplicar
 Helm e sem chamar NerdGraph/NRQL.
@@ -220,16 +226,19 @@ Dois modos, pelos inputs:
 
 | Input | `false` | `true` |
 |---|---|---|
-| `validation_only` | instala Helm, aplica o chart, cria Secret e provisiona no New Relic quando a configuração estiver completa. Exige `confirmation=DEPLOY` apenas nesse caso | somente leitura: nenhum binário instalado, nenhum manifesto aplicado, nenhum recurso alterado |
+| `validation_only` | instala Helm, aplica o chart, cria Secret e provisiona no New Relic quando a configuração estiver completa. Exige `confirmation=DEPLOY` apenas nesse caso | não altera K3s, Helm nem Secrets; com `application_signals_required=true` e URL pública disponível, reconcilia dashboard, alertas e Synthetics no New Relic antes de validar |
 | `application_signals_required` | sinais das APIs ficam registrados como pendentes | exige logs, spans, métricas HTTP e `service.version` dos três serviços |
 
-**Ordem de execução em três passagens.** Na primeira, os Pods das APIs ainda rodam a versão anterior à instrumentação, sem `OTEL_EXPORTER_OTLP_ENDPOINT` nem o formatter novo — exigir os sinais das APIs ali reprovaria o workflow mesmo com o Collector instalado corretamente:
+**Ordem de execução suportada.** Na primeira passagem os Pods das APIs e o
+Entrypoint ainda podem não existir; exigir logs, spans, métricas HTTP, Synthetic
+Monitors ou access log da API Gateway ali reprovaria um ambiente que ainda está
+correto para esse estágio:
 
-1. `validation_only=false`, `application_signals_required=false` — instala o Collector, provisiona o que já é validável, valida cluster e Collector.
-2. Redeploy de Cadastro, Estoque e Ordens, nessa ordem.
-3. `validation_only=true`, `application_signals_required=true` — valida logs, spans, métricas HTTP e a comparação tripla de `service.version`.
+1. Após Auth Deploy e antes de Cadastro: `confirmation=DEPLOY`, `validation_only=false`, `application_signals_required=false` — instala o Collector, provisiona o que já é validável, valida cluster e Collector.
+2. Deploy de Cadastro, Initial Admin, Estoque, Ordens e depois Entrypoint.
+3. Depois do Entrypoint: `validation_only=true`, `application_signals_required=true` — reconcilia os recursos New Relic que dependem da URL pública e valida logs, spans, métricas HTTP, Synthetic Monitors, access log da API Gateway e a comparação tripla de `service.version`.
 
-Uma quarta passagem de consolidação (`validation_only=false`, `application_signals_required=true`) existe apenas quando a passagem 3 descobriu query que ainda precisa ser persistida no dashboard ou nos alertas.
+Uma quarta passagem de consolidação (`validation_only=false`, `application_signals_required=true`) fica como fallback manual apenas se a reconciliação final da etapa 8.1 falhar.
 
 ---
 
@@ -350,4 +359,4 @@ Pré-condição: cluster `ACTIVE`, ALB interno e os 4 repositórios ECR criados.
 Pré-condição: API Gateway aplicada, VPC Link `AVAILABLE`, os três destinos saudáveis no ALB e etapa 5.1 concluída no primeiro provisionamento do ambiente.
 **→ [oficina-ordens-servico](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4)** — seção [Como executar → Etapa 9](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4#etapa-9--collection-postman-execução-manual), a validação funcional pela collection Postman que encerra a sequência.
 
-**Após a etapa 8:** [Observability Deploy](#observability-deploy), neste mesmo repositório. São três passagens, com redeploy dos três serviços entre a primeira e a terceira.
+**Após a etapa 8:** [Observability Deploy](#observability-deploy), neste mesmo repositório, em modo `validation_only=true` e `application_signals_required=true`. Essa passagem fecha os sinais que ficaram pendentes na etapa 4.1.
