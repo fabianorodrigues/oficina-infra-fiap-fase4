@@ -170,6 +170,7 @@ function Read-ObservabilityConfig {
     return [pscustomobject]@{
         Namespace                = Require 'newRelic.namespace'
         Release                  = Require 'newRelic.release'
+        GatewayDeployment        = Require 'newRelic.gatewayDeployment'
         GatewayService           = Require 'newRelic.gatewayService'
         OtlpGrpcPort             = [int](Require 'newRelic.otlpGrpcPort')
         ClusterName              = Require 'newRelic.clusterName'

@@ -3,7 +3,7 @@
 #
 # O que precisa ser provado, porque um post-renderer descuidado corrompe o
 # release inteiro em silencio:
-#   - exatamente UM Deployment alterado, e ele e o nr-otel-gateway;
+#   - exatamente UM Deployment alterado, e ele e o nr-otel-nr-k8s-otel-collector-deployment;
 #   - somente spec.strategy muda;
 #   - kube-state-metrics permanece intocado (vem do values.yaml);
 #   - ausencia do gateway reprova, em vez de aplicar manifesto incompleto.
@@ -27,7 +27,7 @@ metadata:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: nr-otel-gateway
+  name: nr-otel-nr-k8s-otel-collector-deployment
   labels:
     app.kubernetes.io/name: nr-otel
 spec:
@@ -39,7 +39,7 @@ spec:
     spec:
       containers:
         - name: collector
-          image: newrelic/nrdot-collector-k8s:1.19.0
+          image: newrelic/nrdot-collector:1.19.0
           resources:
             requests:
               memory: 256Mi
@@ -95,7 +95,7 @@ else
 fi
 
 # Imagens, resources e selectors nao podem mudar.
-for token in 'image: newrelic/nrdot-collector-k8s:1.19.0' 'memory: 256Mi' 'app.kubernetes.io/name: nr-otel'; do
+for token in 'image: newrelic/nrdot-collector:1.19.0' 'memory: 256Mi' 'app.kubernetes.io/name: nr-otel'; do
     if grep -q "$token" "$work/base.out"; then
         pass "preservado: $token"
     else
@@ -108,7 +108,7 @@ cat > "$work/rolling.yaml" <<'EOF'
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: nr-otel-gateway
+  name: nr-otel-nr-k8s-otel-collector-deployment
 spec:
   strategy:
     type: RollingUpdate
@@ -146,7 +146,7 @@ else
 fi
 
 echo 'Caso 4: manifesto de documento unico sem separador inicial.'
-printf 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: nr-otel-gateway\nspec:\n  replicas: 1\n' \
+printf 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: nr-otel-nr-k8s-otel-collector-deployment\nspec:\n  replicas: 1\n' \
     | "$renderer" > "$work/single.out"
 if grep -q 'type: Recreate' "$work/single.out"; then
     pass 'documento unico transformado'

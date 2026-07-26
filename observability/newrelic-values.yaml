@@ -12,9 +12,6 @@
 
 cluster: oficina-k3s
 
-# Define o nome do Service consumido pelas tres APIs: nr-otel-gateway.
-fullnameOverride: nr-otel
-
 # Envia somente o necessario para a UI de Kubernetes da New Relic. Obrigatorio no
 # t3.medium: o volume cheio nao cabe no orcamento de ingestao nem de memoria.
 lowDataMode: true
@@ -27,15 +24,15 @@ collectorObservability:
   enabled: true
   scrapeIntervalMs: 60000
 
-image:
-  repository: newrelic/nrdot-collector-k8s
-  tag: 1.19.0
-  pullPolicy: IfNotPresent
-
-# O chart usa uma imagem auxiliar de kubectl com tag movel. Fixar e obrigatorio:
-# sem isso o cluster troca de artefato sem nenhuma mudanca de codigo.
-kubectl:
-  image:
+images:
+  collector:
+    repository: newrelic/nrdot-collector
+    tag: 1.19.0
+    pullPolicy: IfNotPresent
+  # O chart usa uma imagem auxiliar de kubectl com tag movel. Fixar e
+  # obrigatorio: sem isso o cluster troca de artefato sem nenhuma mudanca de
+  # codigo.
+  kubectl:
     repository: bitnami/kubectl
     tag: 1.31.4
     pullPolicy: IfNotPresent
