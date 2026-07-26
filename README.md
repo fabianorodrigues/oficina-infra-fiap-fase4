@@ -30,14 +30,14 @@ A **Oficina** é uma plataforma de gestão de oficina mecânica implantada na AW
 
 | Repositório | Responsabilidade | Etapas |
 |---|---|:---:|
-| [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4) | Rede, banco de dados, segredos, estado do Terraform e admin inicial | 1, 3 e 5.1 |
-| **oficina-infra** *(este)* | Plataforma Kubernetes/ALB e entrada de API | 2 e 8 |
+| [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4) | Rede, banco de dados, segredos, estado do Terraform e admin inicial | 1, 3 e 6 |
+| **oficina-infra** *(este)* | Plataforma Kubernetes/ALB, entrada de API e observabilidade | 2, 9 e 10 |
 | [oficina-auth-lambda](https://github.com/fabianorodrigues/oficina-auth-lambda-fiap-fase4) | Autenticação por CPF e validação de token | 4 |
 | [oficina-cadastro](https://github.com/fabianorodrigues/oficina-cadastro-fiap-fase4) | Clientes, veículos, funcionários e catálogo de serviços | 5 |
-| [oficina-estoque](https://github.com/fabianorodrigues/oficina-estoque-fiap-fase4) | Peças, insumos, saldos e reservas | 6 |
-| [oficina-ordens-servico](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4) | Ordens de serviço, orçamento e saga de pagamento | 7 e 9 |
+| [oficina-estoque](https://github.com/fabianorodrigues/oficina-estoque-fiap-fase4) | Peças, insumos, saldos e reservas | 7 |
+| [oficina-ordens-servico](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4) | Ordens de serviço, orçamento e saga de pagamento | 8 e 11 |
 
-**Papel deste repositório:** contém dois stacks Terraform independentes. O **`platform`** (etapa 2) cria a infraestrutura onde os serviços rodam. O **`entrypoint`** (etapa 8) cria a fachada pública da API, que só pode ser aplicada depois que as Lambdas de autenticação e os três serviços estiverem no ar.
+**Papel deste repositório:** contém dois stacks Terraform independentes e o workflow de observabilidade. O **`platform`** (etapa 2) cria a infraestrutura onde os serviços rodam. O **`entrypoint`** (etapa 9) cria a fachada pública da API, que só pode ser aplicada depois que as Lambdas de autenticação e os três serviços estiverem no ar. O **Observability Deploy** (etapa 10) usa essa URL pública para fechar Collector, New Relic, Synthetics e validação de sinais.
 
 ---
 
@@ -49,21 +49,20 @@ A **Oficina** é uma plataforma de gestão de oficina mecânica implantada na AW
 | **2** | **oficina-infra** | **Platform Deploy** | `APPLY` |
 | 3 | oficina-infra-db | Database Bootstrap (estrutura) | `BOOTSTRAP` |
 | 4 | oficina-auth-lambda | Auth Deploy | `DEPLOY` |
-| 4.1 | oficina-infra | Observability Deploy (primeira passagem opcional) | `DEPLOY` |
 | 5 | oficina-cadastro | Cadastro Deploy | `DEPLOY` |
-| 5.1 | oficina-infra-db | Initial Admin Provision | `PROVISION_ADMIN` |
-| 6 | oficina-estoque | Estoque Deploy | `DEPLOY` |
-| 7 | oficina-ordens-servico | Ordens Deploy | `DEPLOY` |
-| **8** | **oficina-infra** | **Entrypoint Deploy** | `APPLY` |
-| 8.1 | oficina-infra | Observability Deploy (validação opcional) | — |
-| 9 | oficina-ordens-servico | Collection Postman (execução manual) | — |
+| 6 | oficina-infra-db | Initial Admin Provision | `PROVISION_ADMIN` |
+| 7 | oficina-estoque | Estoque Deploy | `DEPLOY` |
+| 8 | oficina-ordens-servico | Ordens Deploy | `DEPLOY` |
+| **9** | **oficina-infra** | **Entrypoint Deploy** | `APPLY` |
+| 10 | oficina-infra | Observability Deploy | `DEPLOY` |
+| 11 | oficina-ordens-servico | Collection Postman (execução manual) | — |
 
-As etapas 6 e 7 não dependem do admin inicial e podem rodar em paralelo se desejado; a numeração indica a ordem recomendada. A etapa **5.1** é obrigatória no primeiro provisionamento do ambiente e opcional em redeploys quando o admin já existe. Ela cria a credencial exigida pela etapa 9 e está documentada em [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4#etapa-51-admin-inicial).
+As etapas 7 e 8 não dependem do admin inicial e podem rodar em paralelo se desejado; a numeração indica a ordem recomendada. A etapa **6** é obrigatória no primeiro provisionamento do ambiente e opcional em redeploys quando o admin já existe. Ela cria a credencial exigida pela validação funcional final e está documentada em [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4#etapa-6-admin-inicial).
 
-A etapa **4.1** é opcional, mas recomendada quando a New Relic está configurada: ela instala o Collector antes dos Pods das APIs nascerem, então Cadastro, Estoque e Ordens já sobem apontando para o gateway OTLP interno. Nessa passagem ainda não existem Pods das APIs nem URL pública; Synthetic Monitors, access log da API Gateway e sinais de aplicação ficam registrados como pendentes até a etapa **8.1**.
+O **Observability Deploy** roda uma vez, depois do **Entrypoint Deploy**, quando a URL pública já existe em `/oficina/infra/api/url`. Ele instala/atualiza o Collector, provisiona New Relic por upsert, cria/atualiza os três Synthetic Monitors e valida os sinais das APIs.
 
 > [!IMPORTANT]
-> O **Platform Deploy** (etapa 2) provisiona a EC2 com K3s, o ALB e os *target groups*, mas **não cria os workloads** — cada serviço se registra no seu *target group* ao ser publicado nas etapas 5 a 7. O **Entrypoint Deploy** (etapa 8) valida a saúde de cada destino antes de aplicar, por isso só roda **depois** das etapas 4 a 7.
+> O **Platform Deploy** (etapa 2) provisiona a EC2 com K3s, o ALB e os *target groups*, mas **não cria os workloads** — cada serviço se registra no seu *target group* ao ser publicado nas etapas 5, 7 e 8. O **Entrypoint Deploy** (etapa 9) valida a saúde de cada destino antes de aplicar, por isso só roda **depois** das etapas 4, 5, 7 e 8.
 
 ---
 
@@ -100,7 +99,7 @@ flowchart TB
 
 Cria: EC2 privada com K3s (Amazon Linux 2023, sem SSH e sem IP público, acesso apenas por Systems Manager), ALB interno (listener HTTP, regras de roteamento por path e por *header* de saúde), *target groups* por serviço com `target_type = instance` e health check em `/ready`, grupos de segurança (ALB, node do K3s e acesso do node ao RDS), 4 repositórios ECR (imutáveis, com varredura ao enviar e retenção das 20 últimas imagens) e 4 filas SQS FIFO (comandos e eventos, cada uma com sua *dead-letter queue*).
 
-### Stack `entrypoint` — etapa 8
+### Stack `entrypoint` — etapa 9
 
 ```mermaid
 flowchart LR
@@ -191,7 +190,7 @@ Verifica o bucket de estado e os parâmetros da etapa 1 → valida o plano → a
 
 Duração típica: 5 a 10 minutos.
 
-### Etapa 8 — Entrypoint Deploy
+### Etapa 9 — Entrypoint Deploy
 
 Execute **apenas depois** das etapas 4 a 7.
 
@@ -203,45 +202,45 @@ Valida o ALB da plataforma (interno, listener HTTP, *target groups*) e as Lambda
 
 **Actions → Observability Deploy → Run workflow**
 
-Executável em duas janelas da sequência: uma primeira passagem opcional antes dos
-serviços, e uma validação completa depois do Entrypoint. Quando AWS e New Relic
-estão configurados, instala o Collector da New Relic no K3s, provisiona dashboard,
-policy, alertas já validáveis e, depois que a URL pública existir, os três
-Synthetic Monitors.
-Quando a configuração está ausente, o workflow vira no-op remoto: roda apenas as
-validações estáticas e o contrato do post-renderer, sem criar Secret, sem aplicar
-Helm e sem chamar NerdGraph/NRQL.
+Executável uma vez na sequência normal, **depois do Entrypoint Deploy**. O workflow
+exige a URL pública em `/oficina/infra/api/url`; se ela ainda não existir, falha
+com mensagem clara para rodar o Entrypoint antes.
 
-Configuração opcional da New Relic:
+No modo `DEPLOY`, instala ou atualiza o Collector da New Relic no K3s, provisiona
+dashboard, policy, NRQL alert conditions, os três Synthetic Monitors e suas
+condições de alerta, gera tráfego em `/health/cadastro`, `/health/estoque` e
+`/health/ordens`, e valida logs, spans, métricas HTTP, Synthetics e
+`service.version`.
+
+Os recursos New Relic são tratados por **upsert**: se não existem, são criados; se
+existem, são atualizados; se houver duplicidade, o deploy escolhe um recurso
+canônico de forma determinística, publica aviso no summary e não apaga nada
+automaticamente. Condições duplicadas dentro da mesma policy são atualizadas em
+conjunto para evitar configuração divergente.
+
+Configuração da New Relic:
 
 | Nome | Tipo | Uso | Obrigatório |
 |---|---|---|:---:|
-| `NEW_RELIC_ACCOUNT_ID` | Variable | Conta usada por NerdGraph/NRQL | Só para provisionar ou validar New Relic |
-| `NEW_RELIC_USER_API_KEY` | Secret | Chave de usuário para NerdGraph | Só para provisionar ou validar New Relic |
-| `NEW_RELIC_LICENSE_KEY` | Secret | License key entregue somente ao Collector | Só para instalar Collector/provisionar |
+| `NEW_RELIC_ACCOUNT_ID` | Variable | Conta usada por NerdGraph/NRQL | Sim |
+| `NEW_RELIC_USER_API_KEY` | Secret | Chave de usuário para NerdGraph | Sim |
+| `NEW_RELIC_LICENSE_KEY` | Secret | License key entregue somente ao Collector | Sim no `DEPLOY` |
 | `NEW_RELIC_REGION` | Variable | `US` ou `EU`; default `US` quando vazia | Não |
 | `NEW_RELIC_NOTIFICATION_EMAIL` | Variable | Destination/channel/workflow de alerta por e-mail | Não |
 
 > [!NOTE]
-> A entrega preferencial da `NEW_RELIC_LICENSE_KEY` usa um SecureString temporário em `/oficina/deploy/newrelic/*`. Em ambientes de laboratório onde a role do runner não tem `ssm:PutParameter`, o workflow usa fallback via Systems Manager Run Command para criar somente o Secret Kubernetes versionado do Collector. As APIs continuam recebendo apenas o endereço interno OTLP.
+> A `NEW_RELIC_LICENSE_KEY` usa um SecureString temporário em `/oficina/deploy/newrelic/*`, lido pela EC2 apenas para criar o Secret Kubernetes versionado do Collector. Se o runner não tiver `ssm:PutParameter` ou a EC2 não tiver `ssm:GetParameter`/`kms:Decrypt`, o workflow falha antes de aplicar o Collector. As APIs continuam recebendo apenas o endereço interno OTLP.
 
-Dois modos, pelos inputs:
+Modos do workflow:
 
-| Input | `false` | `true` |
-|---|---|---|
-| `validation_only` | instala Helm, aplica o chart, cria Secret e provisiona no New Relic quando a configuração estiver completa. Exige `confirmation=DEPLOY` apenas nesse caso | não altera K3s, Helm nem Secrets; com `application_signals_required=true` e URL pública disponível, reconcilia dashboard, alertas e Synthetics no New Relic antes de validar |
-| `application_signals_required` | sinais das APIs ficam registrados como pendentes | exige logs, spans, métricas HTTP e `service.version` dos três serviços |
+| `mode` | Efeito |
+|---|---|
+| `DEPLOY` | Caminho mutável da sequência normal. Exige `confirmation=DEPLOY`, branch `main`, AWS, `NEW_RELIC_ACCOUNT_ID`, `NEW_RELIC_USER_API_KEY` e `NEW_RELIC_LICENSE_KEY`. |
+| `VALIDATE` | Somente leitura para rechecagem manual. Não cria Secret, não aplica Helm/Kubernetes e não executa mutations NerdGraph. |
 
-**Ordem de execução suportada.** Na primeira passagem os Pods das APIs e o
-Entrypoint ainda podem não existir; exigir logs, spans, métricas HTTP, Synthetic
-Monitors ou access log da API Gateway ali reprovaria um ambiente que ainda está
-correto para esse estágio:
-
-1. Após Auth Deploy e antes de Cadastro: `confirmation=DEPLOY`, `validation_only=false`, `application_signals_required=false` — instala o Collector, provisiona o que já é validável, valida cluster e Collector.
-2. Deploy de Cadastro, Initial Admin, Estoque, Ordens e depois Entrypoint.
-3. Depois do Entrypoint: `validation_only=true`, `application_signals_required=true` — reconcilia os recursos New Relic que dependem da URL pública e valida logs, spans, métricas HTTP, Synthetic Monitors, access log da API Gateway e a comparação tripla de `service.version`.
-
-Uma quarta passagem de consolidação (`validation_only=false`, `application_signals_required=true`) fica como fallback manual apenas se a reconciliação final da etapa 8.1 falhar.
+`NEW_RELIC_NOTIFICATION_EMAIL` controla apenas a cadeia de e-mail. Sem valor,
+dashboard, policy, alertas e Synthetics são provisionados normalmente, e
+destination/channel/workflow de e-mail são ignorados.
 
 ---
 
@@ -283,7 +282,7 @@ for s in cadastro estoque ordens; do
     --query 'TargetHealthDescriptions[].TargetHealth.State' --output text
 done
 
-# Verificação de saúde pela API pública (após a etapa 8)
+# Verificação de saúde pela API pública (após a etapa 9)
 API=$(aws ssm get-parameter --name /oficina/infra/api/url \
   --region "$REGIAO" --query 'Parameter.Value' --output text)
 for s in cadastro estoque ordens; do
@@ -358,8 +357,10 @@ Este repositório é executado duas vezes na sequência. O destino depende da et
 Pré-condição: cluster `ACTIVE`, ALB interno e os 4 repositórios ECR criados.
 **→ [oficina-infra-db](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4)** — seção [Como executar → Etapa 3](https://github.com/fabianorodrigues/oficina-infra-db-fiap-fase4#etapa-3--database-bootstrap), que cria os bancos, logins e permissões.
 
-**Depois da etapa 8 (Entrypoint Deploy) → etapa 9, obrigatória.**
-Pré-condição: API Gateway aplicada, VPC Link `AVAILABLE`, os três destinos saudáveis no ALB e etapa 5.1 concluída no primeiro provisionamento do ambiente.
-**→ [oficina-ordens-servico](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4)** — seção [Como executar → Etapa 9](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4#etapa-9--collection-postman-execução-manual), a validação funcional pela collection Postman que encerra a sequência.
+**Depois da etapa 9 (Entrypoint Deploy) → etapa 10, obrigatória.**
+Pré-condição: API Gateway aplicada, VPC Link `AVAILABLE`, os três destinos saudáveis no ALB e URL pública publicada em `/oficina/infra/api/url`.
+**→ [Observability Deploy](#observability-deploy)**, neste mesmo repositório, com `mode=DEPLOY` e `confirmation=DEPLOY`.
 
-**Após a etapa 8:** [Observability Deploy](#observability-deploy), neste mesmo repositório, em modo `validation_only=true` e `application_signals_required=true`. Essa passagem fecha os sinais que ficaram pendentes na etapa 4.1.
+**Depois da etapa 10 (Observability Deploy) → etapa 11, obrigatória.**
+Pré-condição: observabilidade validada e etapa 6 concluída no primeiro provisionamento do ambiente.
+**→ [oficina-ordens-servico](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4)** — seção [Como executar → Collection Postman](https://github.com/fabianorodrigues/oficina-ordens-servico-fiap-fase4), a validação funcional pela collection Postman que encerra a sequência.

@@ -29,7 +29,7 @@ case "$cmd:$mode" in
   status:exists_history_fails)
     printf 'NAME: nr-otel\nREVISION: 7\nSTATUS: deployed\n'
     ;;
-  status:list_fallback)
+  status:list_alternative)
     echo 'context deadline exceeded' >&2
     exit 1
     ;;
@@ -44,10 +44,10 @@ case "$cmd:$mode" in
     echo 'history unavailable' >&2
     exit 1
     ;;
-  history:list_fallback)
+  history:list_alternative)
     printf '[{"revision":8}]\n'
     ;;
-  list:list_fallback)
+  list:list_alternative)
     printf '[{"name":"nr-otel","revision":"8","status":"deployed"}]\n'
     ;;
   list:unknown)
@@ -89,15 +89,15 @@ if printf '%s\n' "$output" | grep -q 'OFICINA_RELEASE_STATE=exists' &&
     printf '%s\n' "$output" | grep -q 'helm history indisponivel'; then
     pass 'history indisponivel usa revision do status'
 else
-    fail "fallback de history falhou: $output"
+    fail "alternativa de history falhou: $output"
 fi
 
-output="$(run_case list_fallback)"
+output="$(run_case list_alternative)"
 if printf '%s\n' "$output" | grep -q 'OFICINA_RELEASE_STATE=exists' &&
     printf '%s\n' "$output" | grep -q '"revision":"8"'; then
     pass 'helm list classifica release quando status falha'
 else
-    fail "fallback de helm list falhou: $output"
+    fail "alternativa de helm list falhou: $output"
 fi
 
 output="$(run_case unknown)"

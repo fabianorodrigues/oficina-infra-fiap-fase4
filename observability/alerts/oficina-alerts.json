@@ -3,9 +3,7 @@
     "Politica e condicoes provisionadas por observability/scripts/provision-newrelic.ps1.",
     "NRQL de Alert Condition NAO e NRQL de consulta: condicoes sao processadas por",
     "streaming e nao aceitam SINCE, UNTIL, TIMESERIES nem LIMIT. A janela vive em",
-    "aggregationWindow e thresholdDuration.",
-    "requiresGate indica condicao que depende de descoberta remota: o script so a",
-    "provisiona depois que a query for validada e versionada."
+    "aggregationWindow e thresholdDuration."
   ],
   "policy": {
     "name": "FIAP Oficina - Producao",
@@ -49,8 +47,7 @@
         "expirationDuration": 300,
         "openViolationOnExpiration": true,
         "closeViolationsOnExpiration": false
-      },
-      "requiresGate": 12
+      }
     },
     {
       "name": "Oficina - Collector sem sinal",
@@ -67,18 +64,16 @@
     },
     {
       "name": "Oficina - Taxa de erro 5xx",
-      "_comment": "Filtrar por metricName e obrigatorio: sem isso o count(*) varreria toda a tabela Metric e a porcentagem nao seria taxa de erro de request nenhuma. O fallback em Span e escolhido automaticamente pelo gate 12.",
+      "_comment": "Filtrar por metricName e obrigatorio: sem isso o count(*) varreria toda a tabela Metric e a porcentagem nao seria taxa de erro de request nenhuma.",
       "type": "NRQL_STATIC",
       "nrql": "FROM Metric SELECT percentage(count(*), WHERE http.response.status_code >= 500) WHERE metricName = 'http.server.request.duration' AND service.name LIKE 'oficina-%' FACET service.name",
-      "nrqlFallback": "FROM Span SELECT percentage(count(*), WHERE http.response.status_code >= 500) WHERE service.name LIKE 'oficina-%' AND span.kind = 'server' FACET service.name",
       "operator": "ABOVE",
       "criticalThreshold": 5,
       "aggregationMethod": "EVENT_FLOW",
       "aggregationWindow": 60,
       "aggregationDelay": 120,
       "thresholdDuration": 300,
-      "thresholdOccurrences": "ALL",
-      "requiresGate": 12
+      "thresholdOccurrences": "ALL"
     },
     {
       "name": "Oficina - Falha no processamento da OS",
@@ -114,8 +109,7 @@
       "aggregationWindow": 60,
       "aggregationDelay": 120,
       "thresholdDuration": 600,
-      "thresholdOccurrences": "ALL",
-      "requiresGate": 11
+      "thresholdOccurrences": "ALL"
     },
     {
       "name": "Oficina - Memoria alta no node",
@@ -127,8 +121,7 @@
       "aggregationWindow": 60,
       "aggregationDelay": 120,
       "thresholdDuration": 600,
-      "thresholdOccurrences": "ALL",
-      "requiresGate": 11
+      "thresholdOccurrences": "ALL"
     },
     {
       "name": "Oficina - Pod nao pronto",
@@ -140,8 +133,7 @@
       "aggregationWindow": 60,
       "aggregationDelay": 120,
       "thresholdDuration": 300,
-      "thresholdOccurrences": "ALL",
-      "requiresGate": 11
+      "thresholdOccurrences": "ALL"
     },
     {
       "name": "Oficina - Reinicio excessivo de container",
@@ -153,8 +145,7 @@
       "aggregationWindow": 60,
       "aggregationDelay": 120,
       "thresholdDuration": 600,
-      "thresholdOccurrences": "AT_LEAST_ONCE",
-      "requiresGate": 11
+      "thresholdOccurrences": "AT_LEAST_ONCE"
     }
   ],
   "notification": {

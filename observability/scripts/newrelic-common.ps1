@@ -107,11 +107,11 @@ function Invoke-NodeScript {
 
     $payloadPath = [System.IO.Path]::GetTempFileName()
     try {
-        [ordered]@{
+        $payloadJson = [ordered]@{
             commands         = @($Script)
             executionTimeout = @("$ExecutionTimeoutSeconds")
-        } | ConvertTo-Json -Depth 5 -Compress |
-            Set-Content -LiteralPath $payloadPath -Encoding utf8
+        } | ConvertTo-Json -Depth 5 -Compress
+        [System.IO.File]::WriteAllText($payloadPath, $payloadJson, [System.Text.UTF8Encoding]::new($false))
 
         $commandId = (Invoke-Aws -Arguments @(
                 'ssm', 'send-command',
@@ -333,7 +333,7 @@ function Test-ObservabilityPermissions {
             $decision = $simulation.Output.Trim()
             Write-Host "  $($check.Principal): $action em $($check.Resource) -> $decision"
             if ($decision -in @('explicitDeny', 'implicitDeny')) {
-                throw "Rota preferencial do SecureString indisponivel. Principal: $($check.Arn). Acao: $action. Recurso: $($check.Resource). Regiao: $Region."
+                throw "Rota do SecureString indisponivel. Principal: $($check.Arn). Acao: $action. Recurso: $($check.Resource). Regiao: $Region."
             }
         }
     }
@@ -352,13 +352,14 @@ function New-LicenseParameter {
     try {
         # O valor vai por --cli-input-json: em argv ele apareceria na lista de
         # processos do runner.
-        [ordered]@{
+        $payloadJson = [ordered]@{
             Name      = $Name
             Value     = $Value
             Type      = 'SecureString'
             KeyId     = 'alias/aws/ssm'
             Overwrite = $false
-        } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $payloadPath -Encoding utf8
+        } | ConvertTo-Json -Depth 3
+        [System.IO.File]::WriteAllText($payloadPath, $payloadJson, [System.Text.UTF8Encoding]::new($false))
 
         Invoke-Aws -Arguments @('ssm', 'put-parameter', '--cli-input-json', "file://$payloadPath", '--region', $Region) | Out-Null
         Write-Host "  SecureString criado: $Name"
@@ -438,13 +439,13 @@ function Get-NodePressure {
 }
 
 <#
-Avalia os gates pos-instalacao e classifica a causa.
+Avalia as validacoes pos-instalacao e classifica a causa.
 
 A classificacao existe para nao recomendar t3.large quando a causa nao foi
 capacidade: falha de licenca, de chart, de rede ou de configuracao nao se resolve
 com instancia maior.
 #>
-function Test-CapacityGate {
+function Test-CapacityValidation {
     param(
         [Parameter(Mandatory = $true)][string]$Text,
         [Parameter(Mandatory = $true)][int]$MinimumAvailableMi

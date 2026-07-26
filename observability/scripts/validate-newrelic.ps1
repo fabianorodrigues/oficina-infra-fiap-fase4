@@ -8,15 +8,14 @@
     minutos. Sinais opcionais fazem uma consulta rapida e viram pendencia sem
     esperar.
 
-    Duas categorias de gate:
+    Duas categorias de sinal:
 
       - sempre exigidos: sinais do cluster, do proprio Collector e existencia dos
         recursos provisionados que ja podem existir no ponto atual da sequencia;
-      - exigidos so com ApplicationSignalsRequired: logs, spans, metricas HTTP e a
-        comparacao tripla de service.version. Com a flag desligada eles sao
-        registrados como "aguardando redeploy das APIs instrumentadas" e NAO
-        marcam falha, porque na primeira passagem os Pods ainda rodam a versao
-        anterior.
+      - exigidos so com RequireApiSignals: logs, spans, metricas HTTP e a
+        comparacao tripla de service.version. A flag permanece no script para
+        diagnosticos manuais, mas o workflow normal pos-Entrypoint usa sinais de
+        aplicacao obrigatorios.
 
     Regras de janela por categoria, porque a gramatica difere:
       - consulta de validacao e descoberta: SELECT, FROM e janela explicita;
@@ -32,7 +31,7 @@ param(
     [ValidateSet('US', 'EU')][string]$NewRelicRegion = 'US',
     [string]$ApiUrl,
     [string]$NotificationEmail,
-    [switch]$ApplicationSignalsRequired,
+    [switch]$RequireApiSignals,
     [string]$ConfigPath,
     [ValidateRange(60, 900)][int]$TimeoutSeconds = 300,
     [ValidateRange(5, 60)][int]$IntervalSeconds = 15
@@ -70,6 +69,13 @@ $notificationExpected = -not [string]::IsNullOrWhiteSpace($NotificationEmail)
 $services = @('oficina-cadastro', 'oficina-estoque', 'oficina-ordens-servico')
 $results = [System.Collections.Generic.List[object]]::new()
 
+function Test-ConditionHasEntity {
+    param([Parameter(Mandatory = $true)]$Condition)
+
+    $entitiesProperty = $Condition.PSObject.Properties['entities']
+    return $null -ne $entitiesProperty -and @($entitiesProperty.Value).Count -gt 0
+}
+
 function Add-Check {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -95,9 +101,8 @@ query($accountId: Int!, $nrql: Nrql!) {
 }
 
 <#
-Espera o sinal aparecer quando ele e obrigatorio. Sinal opcional nao pode segurar
-a primeira passagem do deploy: consulta uma vez e, se nao apareceu, registra
-pendencia.
+Espera o sinal aparecer quando ele e obrigatorio. Sinal opcional consulta uma vez
+e, se nao apareceu, registra pendencia sem segurar diagnosticos manuais.
 #>
 function Wait-ForSignal {
     param(
@@ -181,7 +186,7 @@ else {
 }
 
 # ---------------------------------------------------------------------------
-# Gates sempre exigidos: cluster e Collector.
+# Validacoes sempre exigidas: cluster e Collector.
 # ---------------------------------------------------------------------------
 Write-Step 'Sinais do cluster e do Collector'
 
@@ -195,7 +200,7 @@ $sinceClause
     [pscustomobject]@{ Ok = $count -gt 0; Detail = "$count instancia(s) do Collector" }
 } | Out-Null
 
-# Descoberta das metricas de Kubernetes (gate 11).
+# Descoberta das metricas de Kubernetes.
 #
 # O Collector desta instalacao e o OTel (nr-k8s-otel-collector): ele publica
 # metricas dimensionais em Metric -- k8s.node.*, k8s.pod.*, container.* pelo
@@ -204,13 +209,13 @@ $sinceClause
 # (nri-kubernetes), que NAO faz parte deste chart: consultar aqueles tipos
 # reprovava com a coleta inteira funcionando.
 #
-# O gate nao fixa nome de metrica: exige que exista alguma metrica de node com
+# A validacao nao fixa nome de metrica: exige que exista alguma metrica de node com
 # cpu e alguma com memoria, e publica o inventario completo para que widget e
 # alerta sejam escritos sobre nome confirmado, nunca sobre suposicao.
 #
 # Janela propria: quem coleta metrica de node e o DaemonSet do Collector, criado
 # minutos antes nesta mesma execucao e ja observado ainda em PodInitializing.
-Write-Step 'Descoberta das metricas de Kubernetes (gate 11)'
+Write-Step 'Descoberta das metricas de Kubernetes'
 $script:MetricasK8s = @()
 
 Wait-ForSignal -Name 'CPU e memoria do node presentes' -Required -TimeoutOverrideSeconds 600 -Query @"
@@ -263,7 +268,7 @@ if ($script:MetricasK8s.Count -gt 0) {
     Add-Check -Name 'Inventario de metricas de Kubernetes' -Status 'ok' -Detail "$($script:MetricasK8s.Count) metrica(s); lista completa no log do passo"
 
     # Metricas citadas pelas queries versionadas do dashboard e das condicoes.
-    # Nao bloqueia: o gate acima ja provou a coleta. O objetivo aqui e que um nome
+    # Nao bloqueia: a validacao acima ja provou a coleta. O objetivo aqui e que um nome
     # errado apareca como pendencia nomeada, e nao como widget vazio ou alerta que
     # existe sem nunca poder disparar.
     $metricasVersionadas = @(
@@ -286,7 +291,7 @@ if ($script:MetricasK8s.Count -gt 0) {
     }
 }
 
-Write-Step 'Descoberta dos Kubernetes Events (gate 10)'
+Write-Step 'Descoberta dos Kubernetes Events'
 $eventFound = $false
 foreach ($eventType in @('InfrastructureEvent', 'K8sEventSample', 'Log')) {
     try {
@@ -302,16 +307,17 @@ foreach ($eventType in @('InfrastructureEvent', 'K8sEventSample', 'Log')) {
     catch { continue }
 }
 if (-not $eventFound) {
-    # Nenhum evento no periodo nao reprova: o requisito e nao criar query ficticia.
+    # Nenhum evento no periodo nao reprova: a validacao registra a ausencia como
+    # pendencia operacional.
     Add-Check -Name 'Kubernetes Events' -Status 'pendente' -Detail 'Nenhum evento no periodo. Widget registrado como pendente de descoberta.'
 }
 
 # ---------------------------------------------------------------------------
-# Gates de sinais de aplicacao.
+# Validacoes de sinais de aplicacao.
 # ---------------------------------------------------------------------------
-Write-Step "Sinais das APIs (obrigatorios: $($ApplicationSignalsRequired.IsPresent))"
+Write-Step "Sinais das APIs (obrigatorios: $($RequireApiSignals.IsPresent))"
 
-Wait-ForSignal -Name 'Logs dos tres servicos com o correlationId' -Required:$ApplicationSignalsRequired -Query @"
+Wait-ForSignal -Name 'Logs dos tres servicos com o correlationId' -Required:$RequireApiSignals -Query @"
 FROM Log SELECT count(*)
 WHERE correlationId = '$CorrelationId'
 FACET service.name
@@ -326,13 +332,13 @@ SINCE 10 minutes ago
     }
 } | Out-Null
 
-# Gate 9: nao basta o log existir. Campo aninhado em body significa que o filelog
+# Nao basta o log existir. Campo aninhado em body significa que o filelog
 # nao interpretou o JSON, e a correlacao com trace nao funciona.
 #
 # count(campo) conta ocorrencias nao nulas: campo que ficou aninhado em body
 # aparece como zero. A deteccao fica deterministica e nao depende do formato de
 # retorno de keyset(), que ja produziu leitura errada nesta validacao.
-Wait-ForSignal -Name 'Campos de log no nivel superior (gate 9)' -Required:$ApplicationSignalsRequired -Query @"
+Wait-ForSignal -Name 'Campos de log no nivel superior' -Required:$RequireApiSignals -Query @"
 FROM Log SELECT count(service.name) AS 'servico', count(service.version) AS 'versao',
 count(deployment.environment) AS 'ambiente', count(correlationId) AS 'correlacao',
 count(trace.id) AS 'trace', count(span.id) AS 'span'
@@ -362,7 +368,7 @@ SINCE 10 minutes ago
     }
 } | Out-Null
 
-Wait-ForSignal -Name 'Span da API de origem com o correlationId' -Required:$ApplicationSignalsRequired -Query @"
+Wait-ForSignal -Name 'Span da API de origem com o correlationId' -Required:$RequireApiSignals -Query @"
 FROM Span SELECT count(*)
 WHERE correlationId = '$CorrelationId'
 FACET service.name
@@ -373,7 +379,7 @@ SINCE 10 minutes ago
     [pscustomobject]@{ Ok = $found.Count -gt 0; Detail = "servicos: $($found -join ', ')" }
 } | Out-Null
 
-Wait-ForSignal -Name 'Metricas HTTP dos tres servicos' -Required:$ApplicationSignalsRequired -Query @"
+Wait-ForSignal -Name 'Metricas HTTP dos tres servicos' -Required:$RequireApiSignals -Query @"
 FROM Metric SELECT uniques(service.name)
 WHERE metricName LIKE 'http.server.%'
 SINCE 10 minutes ago
@@ -393,9 +399,9 @@ SINCE 10 minutes ago
     }
 } | Out-Null
 
-# Gate 12: semantica HTTP. Decide entre Metric e Span para o alerta de 5xx.
-if ($ApplicationSignalsRequired) {
-    Write-Step 'Descoberta da semantica HTTP (gate 12)'
+# Semantica HTTP.
+if ($RequireApiSignals) {
+    Write-Step 'Descoberta da semantica HTTP'
     $httpShape = 'indefinida'
     try {
         $rows = Invoke-Nrql -Query "FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' SINCE 10 minutes ago"
@@ -413,14 +419,14 @@ if ($ApplicationSignalsRequired) {
             $count = [int](Get-NrqlColumn -Row $(if ($rows.Count -gt 0) { $rows[0] } else { $null }) -Pattern '*count*')
             if ($count -gt 0) {
                 $httpShape = 'Span'
-                Add-Check -Name 'Semantica HTTP por Span (fallback)' -Status 'ok' -Detail "$count span(s) server. Alerta de 5xx deve usar Span."
+                Add-Check -Name 'Semantica HTTP por Span' -Status 'ok' -Detail "$count span(s) server. Alerta de 5xx deve usar Span."
             }
         }
         catch { }
     }
 
     if ($httpShape -eq 'indefinida') {
-        Add-Check -Name 'Semantica HTTP (gate 12)' -Status 'falha' -Detail 'Nem Metric nem Span server encontrados.'
+        Add-Check -Name 'Semantica HTTP' -Status 'falha' -Detail 'Nem Metric nem Span server encontrados.'
     }
 
     # ---------------------------------------------------------------------------
@@ -511,9 +517,9 @@ $sinceClause
 # ---------------------------------------------------------------------------
 # Recursos provisionados e cadeia de notificacao.
 #
-# A primeira passagem pode acontecer antes do Entrypoint. Nesse ponto dashboard,
-# policy e Collector sao obrigatorios, mas Synthetic Monitors dependem da URL
-# publica e ficam pendentes ate /oficina/infra/api/url existir.
+# No fluxo atual a validacao acontece depois do Entrypoint: dashboard, policy,
+# Synthetic Monitors e condicoes ja sao esperados. Duplicatas sao avisos
+# operacionais, nao motivo para travar deploy.
 # ---------------------------------------------------------------------------
 Write-Step 'Recursos provisionados no New Relic'
 
@@ -559,7 +565,7 @@ if ($syntheticsExpected) {
 }
 else {
     foreach ($entity in $syntheticEntities) {
-        Add-Check -Name $entity.Label -Status 'pendente' -Detail 'URL publica indisponivel antes do Entrypoint Deploy.'
+        Add-Check -Name $entity.Label -Status 'pendente' -Detail 'ApiUrl nao informada para esta validacao manual.'
     }
 }
 
@@ -573,12 +579,14 @@ query($accountId: Int!, $name: String!) {
 '@ -Variables @{ accountId = [int]$AccountId; name = $config.PolicyName }
 
     $policies = @($policySearch.data.actor.account.alerts.policiesSearch.policies | Where-Object { $_.name -eq $config.PolicyName })
-    if ($policies.Count -ne 1) {
-        Add-Check -Name 'Policy' -Status 'falha' -Detail "$($policies.Count) ocorrencia(s); esperado exatamente 1."
+    $policy = Select-CanonicalResource -Context $context -Resources $policies -Label "Policy '$($config.PolicyName)'"
+    if ($null -eq $policy) {
+        Add-Check -Name 'Policy' -Status 'falha' -Detail 'Nao encontrada.'
     }
     else {
-        $policyId = $policies[0].id
-        Add-Check -Name 'Policy' -Status 'ok' -Detail $policyId
+        $policyId = $policy.id
+        $policyDetail = if ($policies.Count -gt 1) { "$policyId (canonica entre $($policies.Count) ocorrencias)" } else { $policyId }
+        Add-Check -Name 'Policy' -Status 'ok' -Detail $policyDetail
 
         $expectedSyntheticConditions = @('Oficina Cadastro - Health Failure', 'Oficina Estoque - Health Failure', 'Oficina Ordens - Health Failure')
         if ($syntheticsExpected) {
@@ -595,14 +603,18 @@ query($accountId: Int!, $policyId: ID!) {
             $monitorConditions = @($conditions.data.actor.account.alerts.syntheticsMultiLocationConditionsSearch.conditions)
             foreach ($expected in $expectedSyntheticConditions) {
                 $found = @($monitorConditions | Where-Object { $_.name -eq $expected })
-                if ($found.Count -eq 1 -and @($found[0].entities).Count -gt 0) {
-                    Add-Check -Name "Condicao '$expected' na policy" -Status 'ok' -Detail "referencia $(@($found[0].entities).Count) monitor(es)"
+                if ($found.Count -eq 0) {
+                    Add-Check -Name "Condicao '$expected' na policy" -Status 'falha' -Detail 'Nao encontrada.'
                 }
-                elseif ($found.Count -eq 1) {
-                    Add-Check -Name "Condicao '$expected' na policy" -Status 'falha' -Detail 'Condicao existe mas nao referencia monitor: a indisponibilidade nao viraria e-mail.'
+                elseif (@($found | Where-Object { -not (Test-ConditionHasEntity -Condition $_) }).Count -gt 0) {
+                    Add-Check -Name "Condicao '$expected' na policy" -Status 'falha' -Detail 'Existe condicao sem monitor associado: a indisponibilidade nao viraria e-mail.'
                 }
                 else {
-                    Add-Check -Name "Condicao '$expected' na policy" -Status 'falha' -Detail "$($found.Count) ocorrencia(s); esperado 1."
+                    if ($found.Count -gt 1) {
+                        Add-NerdGraphWarning -Context $context -Message "Condicao de Synthetic '$expected' duplicada na policy $policyId. O DEPLOY atualiza todas, mas a duplicidade deve ser limpa manualmente quando possivel."
+                    }
+                    $references = (@($found | ForEach-Object { @($_.entities).Count }) -join ', ')
+                    Add-Check -Name "Condicao '$expected' na policy" -Status 'ok' -Detail "$($found.Count) ocorrencia(s), monitores por condicao: $references"
                 }
             }
         }
@@ -622,17 +634,38 @@ query($accountId: Int!) {
 '@ -Variables @{ accountId = [int]$AccountId }
 
             $matchingWorkflows = @($workflows.data.actor.account.aiWorkflows.workflows.entities | Where-Object { $_.name -eq $config.WorkflowName })
-            if ($matchingWorkflows.Count -ne 1) {
-                Add-Check -Name 'Workflow de notificacao' -Status 'falha' -Detail "$($matchingWorkflows.Count) ocorrencia(s); esperado 1."
+            if ($matchingWorkflows.Count -eq 0) {
+                Add-Check -Name 'Workflow de notificacao' -Status 'falha' -Detail 'Nao encontrado.'
             }
             else {
-                $filtersPolicy = $false
-                foreach ($predicate in @($matchingWorkflows[0].issuesFilter.predicates)) {
-                    if (@($predicate.values) -contains [string]$policyId) { $filtersPolicy = $true }
+                if ($matchingWorkflows.Count -gt 1) {
+                    $ids = ($matchingWorkflows | ForEach-Object { $_.id }) -join ', '
+                    Add-NerdGraphWarning -Context $context -Message "Workflow '$($config.WorkflowName)' duplicado. IDs: $ids."
                 }
 
-                if ($filtersPolicy) {
-                    Add-Check -Name 'Workflow filtra a policy' -Status 'ok' -Detail $matchingWorkflows[0].id
+                $workflowsFilteringPolicy = @()
+                foreach ($workflow in $matchingWorkflows) {
+                    $predicates = @()
+                    if ($null -ne $workflow.PSObject.Properties['issuesFilter'] -and $null -ne $workflow.issuesFilter) {
+                        $predicates = @($workflow.issuesFilter.predicates)
+                    }
+
+                    foreach ($predicate in $predicates) {
+                        if (@($predicate.values) -contains [string]$policyId) {
+                            $workflowsFilteringPolicy += $workflow
+                            break
+                        }
+                    }
+                }
+
+                if ($workflowsFilteringPolicy.Count -gt 0) {
+                    $detail = if ($matchingWorkflows.Count -gt 1) {
+                        "$($workflowsFilteringPolicy.Count) de $($matchingWorkflows.Count) workflow(s) filtram a policy $policyId"
+                    }
+                    else {
+                        $matchingWorkflows[0].id
+                    }
+                    Add-Check -Name 'Workflow filtra a policy' -Status 'ok' -Detail $detail
                 }
                 else {
                     Add-Check -Name 'Workflow filtra a policy' -Status 'falha' -Detail 'Workflow existe mas nao filtra esta policy: o incidente nao viraria e-mail.'
@@ -676,11 +709,12 @@ foreach ($sinal in @(
 # ---------------------------------------------------------------------------
 $failures = @($results | Where-Object { $_.Status -eq 'falha' })
 $pending = @($results | Where-Object { $_.Status -eq 'pendente' })
+$warnings = @(Get-NerdGraphWarnings -Context $context)
 
 $summary = @(
     "Correlation ID: ``$CorrelationId``",
     "Janela da validacao: $($validationStartedAt.ToString('u'))",
-    "Sinais de aplicacao obrigatorios: $($ApplicationSignalsRequired.IsPresent)",
+    "Sinais de aplicacao obrigatorios: $($RequireApiSignals.IsPresent)",
     '',
     '| Verificacao | Resultado | Detalhe |',
     '|---|---|---|'
@@ -688,6 +722,10 @@ $summary = @(
 
 if ($pending.Count -gt 0) {
     $summary += @('', '### Pendentes', '') + @($pending | ForEach-Object { "- $($_.Name): $($_.Detail)" })
+}
+
+if ($warnings.Count -gt 0) {
+    $summary += @('', '### Avisos operacionais', '') + @($warnings | ForEach-Object { "- $($_.Message)" })
 }
 
 if ($failures.Count -gt 0) {

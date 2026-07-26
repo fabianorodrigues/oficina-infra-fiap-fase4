@@ -247,18 +247,17 @@ $alertsPath = Join-Path $RepositoryRoot 'observability/alerts/oficina-alerts.jso
 if (Test-Path -LiteralPath $alertsPath) {
     $alerts = Get-Content -LiteralPath $alertsPath -Raw | ConvertFrom-Json
     foreach ($condition in $alerts.conditions) {
-        foreach ($field in @('nrql', 'nrqlFallback')) {
-            # Condicao de Synthetic nao tem NRQL: sob StrictMode, acessar a
-            # propriedade inexistente e erro, nao valor nulo.
-            if ($null -eq $condition.PSObject.Properties[$field]) { continue }
-            $query = $condition.$field
-            if ([string]::IsNullOrWhiteSpace($query)) { continue }
-
-            if ($query -notmatch '\bSELECT\b') { Add-Failure "Condicao '$($condition.name)' sem SELECT." }
-            if ($query -notmatch '\bFROM\b') { Add-Failure "Condicao '$($condition.name)' sem FROM." }
-            foreach ($clause in @('SINCE', 'UNTIL', 'TIMESERIES', 'LIMIT')) {
-                if ($query -match "\b$clause\b") {
-                    Add-Failure "Condicao '$($condition.name)' usa $clause. Alert Condition e streaming: a janela vive em aggregationWindow e thresholdDuration."
+        # Condicao de Synthetic nao tem NRQL: sob StrictMode, acessar a
+        # propriedade inexistente e erro, nao valor nulo.
+        if ($null -ne $condition.PSObject.Properties['nrql']) {
+            $query = $condition.nrql
+            if (-not [string]::IsNullOrWhiteSpace($query)) {
+                if ($query -notmatch '\bSELECT\b') { Add-Failure "Condicao '$($condition.name)' sem SELECT." }
+                if ($query -notmatch '\bFROM\b') { Add-Failure "Condicao '$($condition.name)' sem FROM." }
+                foreach ($clause in @('SINCE', 'UNTIL', 'TIMESERIES', 'LIMIT')) {
+                    if ($query -match "\b$clause\b") {
+                        Add-Failure "Condicao '$($condition.name)' usa $clause. Alert Condition e streaming: a janela vive em aggregationWindow e thresholdDuration."
+                    }
                 }
             }
         }

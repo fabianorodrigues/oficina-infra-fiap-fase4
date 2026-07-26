@@ -11,7 +11,8 @@
       - reexecucao cega de mutation, que duplicaria recurso;
       - leitura de uma unica pagina numa listagem paginada, que concluiria
         "nao existe" e criaria duplicidade;
-      - workflow existente que deixou de filtrar a policy.
+      - workflow existente que deixou de filtrar a policy precisa ser corrigido
+        por update idempotente.
 #>
 [CmdletBinding()]
 param()
@@ -275,6 +276,9 @@ function Invoke-NerdGraph {
     if ($Query -match 'aiNotificationsCreateChannel') {
         return Convert-ToObject @{ data = @{ aiNotificationsCreateChannel = @{ channel = @{ id = 'channel-1'; name = $Variables.channel.name }; errors = @() } } }
     }
+    if ($Query -match 'aiNotificationsUpdateChannel') {
+        return Convert-ToObject @{ data = @{ aiNotificationsUpdateChannel = @{ channel = @{ id = $Variables.channelId; name = $Variables.channel.name }; errors = @() } } }
+    }
     if ($Query -match 'aiWorkflowsCreateWorkflow') {
         return Convert-ToObject @{ data = @{ aiWorkflowsCreateWorkflow = @{ workflow = @{ id = 'workflow-1'; name = $Variables.workflow.name }; errors = @() } } }
     }
@@ -373,15 +377,23 @@ if ([string]::IsNullOrWhiteSpace([string]$workflowUpdates[0].Variables.workflow.
     throw 'aiWorkflowsUpdateWorkflow precisa levar o id do workflow dentro de updateWorkflowData.'
 }
 
-# Workflow que deixou de filtrar a policy nao pode ser reportado como 'updated':
-# a cadeia existiria sem entregar e-mail.
+# Workflow que deixou de filtrar a policy precisa ser atualizado com o filtro
+# correto; nao deve exigir limpeza manual antes de reexecutar.
 $script:FiltroDaPolicy = '999'
-try {
-    Set-NotificationChain -Context $context -Name $script:ChainName -Email 'teste@example.com' -PolicyId $script:PolicyId | Out-Null
-    throw 'Workflow com filtro apontando para outra policy deveria reprovar.'
+$script:CapturedCalls.Clear()
+$notificationRepair = Set-NotificationChain -Context $context -Name $script:ChainName -Email 'teste@example.com' -PolicyId $script:PolicyId
+if ($notificationRepair.WorkflowAction -ne 'updated') {
+    throw "Workflow com filtro antigo deveria ser atualizado; acao observada: $($notificationRepair.WorkflowAction)."
 }
-catch {
-    if ($_.Exception.Message -notmatch 'nao filtra a policy') { throw }
+
+$workflowRepairUpdates = @($script:CapturedCalls | Where-Object { $_.Query -match 'aiWorkflowsUpdateWorkflow' })
+if ($workflowRepairUpdates.Count -ne 1) {
+    throw "Esperado 1 update de workflow para corrigir filtro; observado $($workflowRepairUpdates.Count)."
+}
+
+$repairPredicates = @($workflowRepairUpdates[0].Variables.workflow.issuesFilter.predicates)
+if (@($repairPredicates | Where-Object { @($_.values) -contains [string]$script:PolicyId }).Count -ne 1) {
+    throw 'Update de workflow nao levou issuesFilter apontando para a policy atual.'
 }
 
 foreach ($call in $script:CapturedCalls) {

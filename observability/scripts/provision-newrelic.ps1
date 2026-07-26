@@ -7,14 +7,15 @@
     apaga os recursos no New Relic, entao o state deixaria de descrever a realidade
     e a proxima execucao criaria tudo em duplicidade.
 
-    Resolucao por nome estavel, com contagem explicita:
+    Resolucao por nome estavel, com upsert idempotente:
 
         0 resultados  -> criar
         1 resultado   -> atualizar por GUID
-        >1 resultados -> reprovar e listar os GUIDs
+        >1 resultados -> escolher canonico deterministico, atualizar e avisar
 
-    Nunca atualizar arbitrariamente o primeiro resultado: buscar so por nome nao
-    distingue duplicidade deixada por execucao anterior.
+    Condicoes duplicadas dentro da mesma policy sao atualizadas em conjunto para
+    evitar configuracao divergente. Recursos duplicados nao sao apagados
+    automaticamente.
 
     Criar o monitor nao notifica nada por si so. Cada monitor recebe condicao
     propria dentro da policy, senao o uptime aparece no Synthetics e a
@@ -27,7 +28,6 @@ param(
     [ValidateSet('US', 'EU')][string]$NewRelicRegion = 'US',
     [string]$NotificationEmail,
     [string]$ApiUrl,
-    [switch]$ApplicationSignalsReady,
     [string]$ConfigPath
 )
 
@@ -63,17 +63,8 @@ function Add-Result([string]$Kind, [string]$Name, [string]$Guid, [string]$Action
     $results.Add([pscustomobject]@{ Kind = $Kind; Name = $Name; Guid = $Guid; Action = $Action })
 }
 
-# Gates que ainda nao fecharam nao podem virar widget ou condicao: o requisito e
-# nao versionar query baseada em atributo nao confirmado.
-$satisfiedGates = @(9, 10, 11)
-if ($ApplicationSignalsReady) { $satisfiedGates += 12 }
-$deferred = [System.Collections.Generic.List[string]]::new()
-
-function Test-GateSatisfied {
-    param($Item)
-
-    if ($null -eq $Item.PSObject.Properties['requiresGate']) { return $true }
-    return $satisfiedGates -contains [int]$Item.requiresGate
+if ([string]::IsNullOrWhiteSpace($ApiUrl)) {
+    throw 'ApiUrl obrigatoria para Observability Deploy. Execute o Entrypoint Deploy antes de provisionar observabilidade.'
 }
 
 # ---------------------------------------------------------------------------
@@ -88,18 +79,8 @@ foreach ($page in $dashboard.pages) {
     $widgets = @()
     foreach ($widget in $page.widgets) {
         $queries = @()
-        $skip = $false
         foreach ($query in $widget.rawConfiguration.nrqlQueries) {
-            if (-not (Test-GateSatisfied -Item $query)) {
-                $skip = $true
-                continue
-            }
             $queries += @{ accountId = [int64]$AccountId; query = $query.query }
-        }
-
-        if ($skip -or $queries.Count -eq 0) {
-            $deferred.Add("widget '$($widget.title)' (pagina $($page.name))")
-            continue
         }
 
         $widgets += @{
@@ -168,11 +149,9 @@ query($accountId: Int!, $name: String!) {
 '@ -Variables @{ accountId = [int]$AccountId; name = $config.PolicyName }
 
 $policies = @($policySearch.data.actor.account.alerts.policiesSearch.policies | Where-Object { $_.name -eq $config.PolicyName })
-if ($policies.Count -gt 1) {
-    throw "Policy '$($config.PolicyName)' duplicada. IDs: $(($policies | ForEach-Object { $_.id }) -join ', '). Remover a duplicidade antes de reexecutar."
-}
+$policy = Select-CanonicalResource -Context $context -Resources $policies -Label "Policy '$($config.PolicyName)'"
 
-if ($policies.Count -eq 0) {
+if ($null -eq $policy) {
     $createdPolicy = Invoke-NerdGraph -Context $context -Query @'
 mutation($accountId: Int!, $policy: AlertsPolicyInput!) {
   alertsPolicyCreate(accountId: $accountId, policy: $policy) { id name }
@@ -182,7 +161,7 @@ mutation($accountId: Int!, $policy: AlertsPolicyInput!) {
     Add-Result 'Policy' $config.PolicyName $policyId 'created'
 }
 else {
-    $policyId = $policies[0].id
+    $policyId = $policy.id
     Invoke-NerdGraph -Context $context -Query @'
 mutation($accountId: Int!, $id: ID!, $policy: AlertsPolicyUpdateInput!) {
   alertsPolicyUpdate(accountId: $accountId, id: $id, policy: $policy) { id name }
@@ -195,31 +174,25 @@ mutation($accountId: Int!, $id: ID!, $policy: AlertsPolicyUpdateInput!) {
 # Synthetic Monitors.
 #
 # Criados antes das condicoes: a condicao de Synthetic precisa do GUID do monitor.
-# Somente depois que a URL publica resolve.
 # ---------------------------------------------------------------------------
 $monitorGuids = @{}
-if ([string]::IsNullOrWhiteSpace($ApiUrl)) {
-    Write-Host 'URL publica ausente: Synthetic Monitors nao serao provisionados nesta execucao.'
-    $deferred.Add('Synthetic Monitors (URL publica indisponivel)')
-}
-else {
-    Write-Step 'Synthetic Monitors'
-    $synthetics = (Get-Content -LiteralPath $syntheticsPath -Raw).Replace('__API_URL__', $ApiUrl.TrimEnd('/')) | ConvertFrom-Json
-    $monitorTags = @($synthetics.tags | ForEach-Object { @{ key = $_.key; values = @($_.values) } })
+Write-Step 'Synthetic Monitors'
+$synthetics = (Get-Content -LiteralPath $syntheticsPath -Raw).Replace('__API_URL__', $ApiUrl.TrimEnd('/')) | ConvertFrom-Json
+$monitorTags = @($synthetics.tags | ForEach-Object { @{ key = $_.key; values = @($_.values) } })
 
-    foreach ($monitor in $synthetics.monitors) {
-        $monitorInput = @{
-            name      = $monitor.name
-            uri       = $monitor.uri
-            period    = $synthetics.period
-            status    = $synthetics.status
-            locations = @{ public = @($synthetics.locations.public) }
-            tags      = $monitorTags
-        }
+foreach ($monitor in $synthetics.monitors) {
+    $monitorInput = @{
+        name      = $monitor.name
+        uri       = $monitor.uri
+        period    = $synthetics.period
+        status    = $synthetics.status
+        locations = @{ public = @($synthetics.locations.public) }
+        tags      = $monitorTags
+    }
 
-        $existing = Find-SingleEntity -Context $context -Query "name = '$($monitor.name)' AND type = 'MONITOR'" -Label 'monitor'
-        if ($null -eq $existing) {
-            $createdMonitor = Invoke-NerdGraph -Context $context -Query @'
+    $existing = Find-SingleEntity -Context $context -Query "name = '$($monitor.name)' AND type = 'MONITOR'" -Label 'monitor'
+    if ($null -eq $existing) {
+        $createdMonitor = Invoke-NerdGraph -Context $context -Query @'
 mutation($accountId: Int!, $monitor: SyntheticsCreateSimpleMonitorInput!) {
   syntheticsCreateSimpleMonitor(accountId: $accountId, monitor: $monitor) {
     monitor { guid name }
@@ -227,12 +200,12 @@ mutation($accountId: Int!, $monitor: SyntheticsCreateSimpleMonitorInput!) {
   }
 }
 '@ -Variables @{ accountId = [int]$AccountId; monitor = $monitorInput }
-            Assert-NoMutationErrors -Payload $createdMonitor.data.syntheticsCreateSimpleMonitor -Label 'syntheticsCreateSimpleMonitor'
-            $guid = $createdMonitor.data.syntheticsCreateSimpleMonitor.monitor.guid
-            Add-Result 'Monitor' $monitor.name $guid 'created'
-        }
-        else {
-            $updatedMonitor = Invoke-NerdGraph -Context $context -Query @'
+        Assert-NoMutationErrors -Payload $createdMonitor.data.syntheticsCreateSimpleMonitor -Label 'syntheticsCreateSimpleMonitor'
+        $guid = $createdMonitor.data.syntheticsCreateSimpleMonitor.monitor.guid
+        Add-Result 'Monitor' $monitor.name $guid 'created'
+    }
+    else {
+        $updatedMonitor = Invoke-NerdGraph -Context $context -Query @'
 mutation($guid: EntityGuid!, $monitor: SyntheticsUpdateSimpleMonitorInput!) {
   syntheticsUpdateSimpleMonitor(guid: $guid, monitor: $monitor) {
     monitor { guid name }
@@ -240,13 +213,12 @@ mutation($guid: EntityGuid!, $monitor: SyntheticsUpdateSimpleMonitorInput!) {
   }
 }
 '@ -Variables @{ guid = $existing.guid; monitor = $monitorInput }
-            Assert-NoMutationErrors -Payload $updatedMonitor.data.syntheticsUpdateSimpleMonitor -Label 'syntheticsUpdateSimpleMonitor'
-            $guid = $existing.guid
-            Add-Result 'Monitor' $monitor.name $guid 'updated'
-        }
-
-        $monitorGuids[$monitor.name] = $guid
+        Assert-NoMutationErrors -Payload $updatedMonitor.data.syntheticsUpdateSimpleMonitor -Label 'syntheticsUpdateSimpleMonitor'
+        $guid = $existing.guid
+        Add-Result 'Monitor' $monitor.name $guid 'updated'
     }
+
+    $monitorGuids[$monitor.name] = $guid
 }
 
 # ---------------------------------------------------------------------------
@@ -254,24 +226,20 @@ mutation($guid: EntityGuid!, $monitor: SyntheticsUpdateSimpleMonitorInput!) {
 # ---------------------------------------------------------------------------
 Write-Step 'Condicoes de alerta'
 foreach ($condition in $alerts.conditions) {
-    if (-not (Test-GateSatisfied -Item $condition)) {
-        $deferred.Add("condicao '$($condition.name)'")
-        continue
-    }
-
     if ($condition.type -eq 'SYNTHETIC_MULTI_LOCATION') {
         if (-not $monitorGuids.ContainsKey($condition.monitorName)) {
-            $deferred.Add("condicao '$($condition.name)' (monitor ainda nao provisionado)")
-            continue
+            throw "Condicao '$($condition.name)' referencia monitor inexistente no arquivo de Synthetics: $($condition.monitorName)."
         }
 
-        $guid = Set-SyntheticCondition -Context $context -PolicyId $policyId -Condition $condition -MonitorGuid $monitorGuids[$condition.monitorName]
-        Add-Result 'Condicao' $condition.name $guid.Guid $guid.Action
+        foreach ($guid in @(Set-SyntheticCondition -Context $context -PolicyId $policyId -Condition $condition -MonitorGuid $monitorGuids[$condition.monitorName])) {
+            Add-Result 'Condicao' $condition.name $guid.Guid $guid.Action
+        }
         continue
     }
 
-    $guid = Set-NrqlCondition -Context $context -PolicyId $policyId -Condition $condition -UseFallback:(-not $ApplicationSignalsReady)
-    Add-Result 'Condicao' $condition.name $guid.Guid $guid.Action
+    foreach ($guid in @(Set-NrqlCondition -Context $context -PolicyId $policyId -Condition $condition)) {
+        Add-Result 'Condicao' $condition.name $guid.Guid $guid.Action
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -282,7 +250,6 @@ foreach ($condition in $alerts.conditions) {
 # ---------------------------------------------------------------------------
 if ([string]::IsNullOrWhiteSpace($NotificationEmail)) {
     Write-Host 'E-mail de notificacao ausente: destination, channel e workflow nao serao provisionados.'
-    $deferred.Add('cadeia de notificacao (e-mail nao informado)')
 }
 else {
     Write-Step "Cadeia de notificacao '$($config.WorkflowName)'"
@@ -310,13 +277,13 @@ $summary = @(
 
 $results | Format-Table Kind, Name, Action, Guid -AutoSize | Out-String | Write-Host
 
-if ($deferred.Count -gt 0) {
-    $summary += @('', '### Pendentes de descoberta remota', '')
-    $summary += ($deferred | Sort-Object -Unique | ForEach-Object { "- $_" })
-    $summary += @('', 'Nenhuma query ficticia foi versionada. Reexecutar depois de fechar os gates correspondentes.')
+$warnings = @(Get-NerdGraphWarnings -Context $context)
+if ($warnings.Count -gt 0) {
+    $summary += @('', '### Avisos operacionais', '')
+    $summary += ($warnings | ForEach-Object { "- $($_.Message)" })
     Write-Host ''
-    Write-Host 'Pendentes de descoberta remota:'
-    $deferred | Sort-Object -Unique | ForEach-Object { Write-Host " - $_" }
+    Write-Host 'Avisos operacionais:'
+    $warnings | ForEach-Object { Write-Host " - $($_.Message)" }
 }
 
 $summaryPath = $env:GITHUB_STEP_SUMMARY

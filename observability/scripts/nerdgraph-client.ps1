@@ -26,7 +26,62 @@ function New-NerdGraphContext {
         ApiKey    = $ApiKey
         Endpoint  = $endpoint
         Region    = $Region
+        Warnings  = [System.Collections.Generic.List[object]]::new()
     }
+}
+
+function Add-NerdGraphWarning {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+
+    Write-Host "  AVISO: $Message"
+    if ($null -ne $Context.PSObject.Properties['Warnings'] -and $null -ne $Context.Warnings) {
+        $Context.Warnings.Add([pscustomobject]@{ Message = $Message }) | Out-Null
+    }
+}
+
+function Get-NerdGraphWarnings {
+    param([Parameter(Mandatory = $true)]$Context)
+
+    if ($null -eq $Context.PSObject.Properties['Warnings'] -or $null -eq $Context.Warnings) {
+        return @()
+    }
+
+    return @($Context.Warnings)
+}
+
+function Get-CanonicalResourceKey {
+    param([Parameter(Mandatory = $true)]$Resource)
+
+    foreach ($propertyName in @('guid', 'id')) {
+        $property = $Resource.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            return [string]$property.Value
+        }
+    }
+
+    return ($Resource | ConvertTo-Json -Depth 10 -Compress)
+}
+
+function Select-CanonicalResource {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Resources,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $ordered = @($Resources | Sort-Object { Get-CanonicalResourceKey -Resource $_ })
+    if ($ordered.Count -eq 0) { return $null }
+
+    if ($ordered.Count -gt 1) {
+        $ids = ($ordered | ForEach-Object { Get-CanonicalResourceKey -Resource $_ }) -join ', '
+        $canonical = Get-CanonicalResourceKey -Resource $ordered[0]
+        Add-NerdGraphWarning -Context $Context -Message "$Label possui $($ordered.Count) ocorrencia(s). Usando canonico $canonical e mantendo duplicados para limpeza operacional futura. IDs/GUIDs: $ids."
+    }
+
+    return $ordered[0]
 }
 
 <#
@@ -155,10 +210,10 @@ Resolve entidade por nome estavel com contagem explicita.
 
 0 resultados  -> devolve null (criar)
 1 resultado   -> devolve a entidade (atualizar por GUID)
->1 resultados -> reprova e lista os GUIDs
+>1 resultados -> escolhe canonico deterministico e registra aviso
 
-Nunca devolver o primeiro de varios: buscar so por nome nao distingue duplicidade
-deixada por execucao anterior, e atualizar arbitrariamente esconderia o problema.
+Duplicidade no New Relic nao bloqueia o deploy: a execucao atualiza um recurso
+canonico e deixa a limpeza manual como atividade operacional explicita.
 #>
 function Find-SingleEntity {
     param(
@@ -174,27 +229,17 @@ query($query: String!) {
 '@ -Variables @{ query = $Query }
 
     $entities = @($response.data.actor.entitySearch.results.entities)
-    if ($entities.Count -eq 0) { return $null }
-    if ($entities.Count -eq 1) { return $entities[0] }
-
-    $guids = ($entities | ForEach-Object { $_.guid }) -join ', '
-    throw "$Label duplicado para a busca [$Query]. GUIDs: $guids. Remover a duplicidade antes de reexecutar; atualizar o primeiro resultado esconderia o problema."
+    return Select-CanonicalResource -Context $Context -Resources $entities -Label "$Label para a busca [$Query]"
 }
 
 function Set-NrqlCondition {
     param(
         [Parameter(Mandatory = $true)]$Context,
         [Parameter(Mandatory = $true)][string]$PolicyId,
-        [Parameter(Mandatory = $true)]$Condition,
-        [switch]$UseFallback
+        [Parameter(Mandatory = $true)]$Condition
     )
 
     $query = $Condition.nrql
-    if ($UseFallback -and $null -ne $Condition.PSObject.Properties['nrqlFallback']) {
-        # A escolha entre Metric e Span e automatica, decidida pelo gate de
-        # semantica HTTP; nao existe decisao manual aqui.
-        $query = $Condition.nrqlFallback
-    }
 
     # $input e variavel automatica do PowerShell: sobrescreve-la dentro de uma
     # funcao mascara o enumerador do pipeline.
@@ -231,23 +276,33 @@ function Set-NrqlCondition {
             })
     }
 
-    $existing = Find-SingleNrqlCondition -Context $Context -PolicyId $PolicyId -Name $Condition.name
+    $existingConditions = @(Find-NrqlConditions -Context $Context -PolicyId $PolicyId -Name $Condition.name)
 
-    if ($null -eq $existing) {
+    if ($existingConditions.Count -eq 0) {
         $created = Invoke-NerdGraph -Context $Context -Query @'
 mutation($accountId: Int!, $policyId: ID!, $condition: AlertsNrqlConditionStaticInput!) {
   alertsNrqlConditionStaticCreate(accountId: $accountId, policyId: $policyId, condition: $condition) { id name }
 }
 '@ -Variables @{ accountId = [int]$Context.AccountId; policyId = $PolicyId; condition = $conditionInput }
-        return [pscustomobject]@{ Guid = $created.data.alertsNrqlConditionStaticCreate.id; Action = 'created' }
+        return @([pscustomobject]@{ Guid = $created.data.alertsNrqlConditionStaticCreate.id; Action = 'created' })
     }
 
-    $updated = Invoke-NerdGraph -Context $Context -Query @'
+    if ($existingConditions.Count -gt 1) {
+        $ids = ($existingConditions | ForEach-Object { $_.id }) -join ', '
+        Add-NerdGraphWarning -Context $Context -Message "Condicao NRQL '$($Condition.name)' duplicada na policy $PolicyId. Atualizando todas para evitar divergencia. IDs: $ids."
+    }
+
+    $updates = @()
+    foreach ($existing in $existingConditions) {
+        $updated = Invoke-NerdGraph -Context $Context -Query @'
 mutation($accountId: Int!, $id: ID!, $condition: AlertsNrqlConditionUpdateStaticInput!) {
   alertsNrqlConditionStaticUpdate(accountId: $accountId, id: $id, condition: $condition) { id name }
 }
 '@ -Variables @{ accountId = [int]$Context.AccountId; id = $existing.id; condition = $conditionInput }
-    return [pscustomobject]@{ Guid = $updated.data.alertsNrqlConditionStaticUpdate.id; Action = 'updated' }
+        $updates += [pscustomobject]@{ Guid = $updated.data.alertsNrqlConditionStaticUpdate.id; Action = 'updated' }
+    }
+
+    return @($updates)
 }
 
 <#
@@ -256,7 +311,7 @@ Busca condicao por nome E policyId.
 Buscar so por nome nao serve: o mesmo nome pode existir em outra policy, e a
 condicao precisa pertencer a policy correta para a notificacao funcionar.
 #>
-function Find-SingleNrqlCondition {
+function Find-NrqlConditions {
     param(
         [Parameter(Mandatory = $true)]$Context,
         [Parameter(Mandatory = $true)][string]$PolicyId,
@@ -274,13 +329,21 @@ query($accountId: Int!, $name: String!) {
 '@ -Variables @{ accountId = [int]$Context.AccountId; name = $Name }
 
     $encontradas = @($response.data.actor.account.alerts.nrqlConditionsSearch.nrqlConditions |
-        Where-Object { $_.name -eq $Name -and [string]$_.policyId -eq [string]$PolicyId })
+        Where-Object { $_.name -eq $Name -and [string]$_.policyId -eq [string]$PolicyId } |
+        Sort-Object { [string]$_.id })
 
-    if ($encontradas.Count -eq 0) { return $null }
-    if ($encontradas.Count -eq 1) { return $encontradas[0] }
+    return @($encontradas)
+}
 
-    $ids = ($encontradas | ForEach-Object { $_.id }) -join ', '
-    throw "Condicao '$Name' duplicada na policy $PolicyId. IDs: $ids. Remover a duplicidade antes de reexecutar."
+function Find-SingleNrqlCondition {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$PolicyId,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $conditions = @(Find-NrqlConditions -Context $Context -PolicyId $PolicyId -Name $Name)
+    return Select-CanonicalResource -Context $Context -Resources $conditions -Label "Condicao NRQL '$Name' na policy $PolicyId"
 }
 
 function Set-SyntheticCondition {
@@ -303,9 +366,9 @@ function Set-SyntheticCondition {
         violationTimeLimitSeconds = [int]$Condition.violationTimeLimitSeconds
     }
 
-    $existing = Find-SingleLocationCondition -Context $Context -PolicyId $PolicyId -Name $Condition.name
+    $existingConditions = @(Find-LocationConditions -Context $Context -PolicyId $PolicyId -Name $Condition.name)
 
-    if ($null -eq $existing) {
+    if ($existingConditions.Count -eq 0) {
         $created = Invoke-NerdGraph -Context $Context -Query @'
 mutation($accountId: Int!, $policyId: ID!, $condition: AlertsSyntheticsMultiLocationConditionInput!) {
   alertsSyntheticsMultiLocationConditionCreate(accountId: $accountId, policyId: $policyId, condition: $condition) { id name }
@@ -315,10 +378,17 @@ mutation($accountId: Int!, $policyId: ID!, $condition: AlertsSyntheticsMultiLoca
             policyId  = $PolicyId
             condition = $conditionInput
         }
-        return [pscustomobject]@{ Guid = $created.data.alertsSyntheticsMultiLocationConditionCreate.id; Action = 'created' }
+        return @([pscustomobject]@{ Guid = $created.data.alertsSyntheticsMultiLocationConditionCreate.id; Action = 'created' })
     }
 
-    $updated = Invoke-NerdGraph -Context $Context -Query @'
+    if ($existingConditions.Count -gt 1) {
+        $ids = ($existingConditions | ForEach-Object { $_.id }) -join ', '
+        Add-NerdGraphWarning -Context $Context -Message "Condicao de Synthetic '$($Condition.name)' duplicada na policy $PolicyId. Atualizando todas para evitar divergencia. IDs: $ids."
+    }
+
+    $updates = @()
+    foreach ($existing in $existingConditions) {
+        $updated = Invoke-NerdGraph -Context $Context -Query @'
 mutation($accountId: Int!, $id: ID!, $condition: AlertsSyntheticsMultiLocationConditionUpdateInput!) {
   alertsSyntheticsMultiLocationConditionUpdate(accountId: $accountId, id: $id, condition: $condition) { id name }
 }
@@ -327,10 +397,13 @@ mutation($accountId: Int!, $id: ID!, $condition: AlertsSyntheticsMultiLocationCo
         id        = $existing.id
         condition = $conditionInput
     }
-    return [pscustomobject]@{ Guid = $updated.data.alertsSyntheticsMultiLocationConditionUpdate.id; Action = 'updated' }
+        $updates += [pscustomobject]@{ Guid = $updated.data.alertsSyntheticsMultiLocationConditionUpdate.id; Action = 'updated' }
+    }
+
+    return @($updates)
 }
 
-function Find-SingleLocationCondition {
+function Find-LocationConditions {
     param(
         [Parameter(Mandatory = $true)]$Context,
         [Parameter(Mandatory = $true)][string]$PolicyId,
@@ -348,13 +421,21 @@ query($accountId: Int!, $policyId: ID!) {
 '@ -Variables @{ accountId = [int]$Context.AccountId; policyId = $PolicyId }
 
     $conditions = @($response.data.actor.account.alerts.syntheticsMultiLocationConditionsSearch.conditions |
-        Where-Object { $_.name -eq $Name })
+        Where-Object { $_.name -eq $Name } |
+        Sort-Object { [string]$_.id })
 
-    if ($conditions.Count -eq 0) { return $null }
-    if ($conditions.Count -eq 1) { return $conditions[0] }
+    return @($conditions)
+}
 
-    $ids = ($conditions | ForEach-Object { $_.id }) -join ', '
-    throw "Condicao de Synthetic '$Name' duplicada na policy $PolicyId. IDs: $ids."
+function Find-SingleLocationCondition {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$PolicyId,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $conditions = @(Find-LocationConditions -Context $Context -PolicyId $PolicyId -Name $Name)
+    return Select-CanonicalResource -Context $Context -Resources $conditions -Label "Condicao de Synthetic '$Name' na policy $PolicyId"
 }
 
 <#
@@ -421,13 +502,11 @@ query($accountId: Int!, $cursor: String) {
 '@ -SelectPage { param($resposta) $resposta.data.actor.account.aiNotifications.destinations }
 
     $existingDestinations = @($destinations | Where-Object { $_.name -eq $Name })
-    if ($existingDestinations.Count -gt 1) {
-        throw "Destination '$Name' duplicado. IDs: $(($existingDestinations | ForEach-Object { $_.id }) -join ', ')."
-    }
+    $existingDestination = Select-CanonicalResource -Context $Context -Resources $existingDestinations -Label "Destination '$Name'"
 
     $destinationProperties = @(@{ key = 'email'; value = $Email })
 
-    if ($existingDestinations.Count -eq 0) {
+    if ($null -eq $existingDestination) {
         $created = Invoke-NerdGraph -Context $Context -Query @'
 mutation($accountId: Int!, $destination: AiNotificationsDestinationInput!) {
   aiNotificationsCreateDestination(accountId: $accountId, destination: $destination) {
@@ -444,7 +523,7 @@ mutation($accountId: Int!, $destination: AiNotificationsDestinationInput!) {
         $destinationAction = 'created'
     }
     else {
-        $destinationId = $existingDestinations[0].id
+        $destinationId = $existingDestination.id
         $updated = Invoke-NerdGraph -Context $Context -Query @'
 mutation($accountId: Int!, $destinationId: ID!, $destination: AiNotificationsDestinationUpdate!) {
   aiNotificationsUpdateDestination(accountId: $accountId, destinationId: $destinationId, destination: $destination) {
@@ -470,15 +549,13 @@ query($accountId: Int!, $cursor: String) {
 '@ -SelectPage { param($resposta) $resposta.data.actor.account.aiNotifications.channels }
 
     $existingChannels = @($channels | Where-Object { $_.name -eq $Name })
-    if ($existingChannels.Count -gt 1) {
-        throw "Channel '$Name' duplicado. IDs: $(($existingChannels | ForEach-Object { $_.id }) -join ', ')."
-    }
+    $existingChannel = Select-CanonicalResource -Context $Context -Resources $existingChannels -Label "Channel '$Name'"
 
     $channelProperties = @(
         @{ key = 'subject'; value = '[FIAP Oficina] {{ issueTitle }}' }
     )
 
-    if ($existingChannels.Count -eq 0) {
+    if ($null -eq $existingChannel) {
         $created = Invoke-NerdGraph -Context $Context -Query @'
 mutation($accountId: Int!, $channel: AiNotificationsChannelInput!) {
   aiNotificationsCreateChannel(accountId: $accountId, channel: $channel) {
@@ -501,7 +578,24 @@ mutation($accountId: Int!, $channel: AiNotificationsChannelInput!) {
         $channelAction = 'created'
     }
     else {
-        $channelId = $existingChannels[0].id
+        $channelId = $existingChannel.id
+        $updated = Invoke-NerdGraph -Context $Context -Query @'
+mutation($accountId: Int!, $channelId: ID!, $channel: AiNotificationsChannelUpdate!) {
+  aiNotificationsUpdateChannel(accountId: $accountId, channelId: $channelId, channel: $channel) {
+    channel { id name }
+    errors { __typename }
+  }
+}
+'@ -Variables @{
+            accountId = [int]$Context.AccountId
+            channelId = $channelId
+            channel   = @{
+                name          = $Name
+                destinationId = $destinationId
+                properties    = $channelProperties
+            }
+        }
+        Assert-NoMutationErrors -Payload $updated.data.aiNotificationsUpdateChannel -Label 'aiNotificationsUpdateChannel'
         $channelAction = 'updated'
     }
 
@@ -517,9 +611,7 @@ query($accountId: Int!, $cursor: String) {
 '@ -SelectPage { param($resposta) $resposta.data.actor.account.aiWorkflows.workflows }
 
     $existingWorkflows = @($workflows | Where-Object { $_.name -eq $Name })
-    if ($existingWorkflows.Count -gt 1) {
-        throw "Workflow '$Name' duplicado. IDs: $(($existingWorkflows | ForEach-Object { $_.id }) -join ', ')."
-    }
+    $existingWorkflow = Select-CanonicalResource -Context $Context -Resources $existingWorkflows -Label "Workflow '$Name'"
 
     # O filtro amarra o workflow a policy: sem ele o workflow existiria sem
     # relacao com os incidentes desta solucao.
@@ -533,7 +625,7 @@ query($accountId: Int!, $cursor: String) {
             })
     }
 
-    if ($existingWorkflows.Count -eq 0) {
+    if ($null -eq $existingWorkflow) {
         $created = Invoke-NerdGraph -Context $Context -Query @'
 mutation($accountId: Int!, $workflow: AiWorkflowsCreateWorkflowInput!) {
   aiWorkflowsCreateWorkflow(accountId: $accountId, createWorkflowData: $workflow) {
@@ -557,15 +649,14 @@ mutation($accountId: Int!, $workflow: AiWorkflowsCreateWorkflowInput!) {
         $workflowAction = 'created'
     }
     else {
-        $workflowId = $existingWorkflows[0].id
+        $workflowId = $existingWorkflow.id
 
-        # O update nao reescreve o issuesFilter, entao um workflow que deixou de
-        # apontar para esta policy (policy recriada com outro id, filtro editado
-        # na UI) continuaria existindo sem notificar nada. Reportar 'updated'
-        # sobre uma cadeia que nao entrega e-mail e pior que reprovar aqui.
+        # O update tambem reescreve o issuesFilter: se a policy foi recriada, ou
+        # alguem editou o workflow pela UI, o deploy volta a amarrar a notificacao
+        # na policy canonica desta solucao.
         $predicados = @()
-        if ($null -ne $existingWorkflows[0].PSObject.Properties['issuesFilter'] -and $null -ne $existingWorkflows[0].issuesFilter) {
-            $predicados = @($existingWorkflows[0].issuesFilter.predicates)
+        if ($null -ne $existingWorkflow.PSObject.Properties['issuesFilter'] -and $null -ne $existingWorkflow.issuesFilter) {
+            $predicados = @($existingWorkflow.issuesFilter.predicates)
         }
 
         $filtraPolicy = $false
@@ -574,7 +665,7 @@ mutation($accountId: Int!, $workflow: AiWorkflowsCreateWorkflowInput!) {
         }
 
         if (-not $filtraPolicy) {
-            throw "Workflow '$Name' ($workflowId) existe mas nao filtra a policy ${PolicyId}: o incidente nao viraria e-mail. Corrigir o filtro no New Relic ou remover o workflow para que a proxima execucao o recrie amarrado a policy."
+            Add-NerdGraphWarning -Context $Context -Message "Workflow '$Name' ($workflowId) existia sem filtrar a policy $PolicyId. O filtro sera corrigido nesta execucao."
         }
 
         # Diferente das demais mutations de update, aiWorkflowsUpdateWorkflow nao
@@ -594,7 +685,9 @@ mutation($accountId: Int!, $workflow: AiWorkflowsUpdateWorkflowInput!) {
                 name                  = $Name
                 workflowEnabled       = $true
                 destinationsEnabled   = $true
+                issuesFilter          = $issuesFilter
                 destinationConfigurations = @(@{ channelId = $channelId; notificationTriggers = @('ACTIVATED', 'CLOSED') })
+                mutingRulesHandling   = 'NOTIFY_ALL_ISSUES'
             }
         }
         Assert-NoMutationErrors -Payload $updated.data.aiWorkflowsUpdateWorkflow -Label 'aiWorkflowsUpdateWorkflow'

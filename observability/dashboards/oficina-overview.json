@@ -4,10 +4,7 @@
     "__ACCOUNT_ID__ e substituido em runtime.",
     "Widgets exigem SELECT e FROM; SINCE e opcional de proposito, para que o",
     "time picker global do dashboard funcione. Janela fixa so onde o widget",
-    "precisa dela.",
-    "Widgets marcados com requiresGate dependem de descoberta remota e sao",
-    "adicionados pelo script somente depois que a query correspondente for",
-    "validada e versionada. Nenhuma query ficticia entra aqui."
+    "precisa dela."
   ],
   "name": "FIAP Oficina - Visao Geral",
   "description": "Telemetria da solucao FIAP Fase 4. managedBy=fiap-fase4 solution=oficina environment=production",
@@ -126,7 +123,7 @@
     },
     {
       "name": "APIs",
-      "description": "Requests, latencia e erros dos tres servicos. Nomes de metrica e atributo confirmados pelo gate 12.",
+      "description": "Requests, latencia e erros dos tres servicos. Nomes de metrica e atributo confirmados pela validacao New Relic.",
       "widgets": [
         {
           "title": "Requests por servico",
@@ -136,8 +133,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' FACET service.name TIMESERIES",
-                "requiresGate": 12
+                "query": "FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' FACET service.name TIMESERIES"
               }
             ]
           }
@@ -150,8 +146,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM Metric SELECT average(http.server.request.duration) FACET service.name TIMESERIES",
-                "requiresGate": 12
+                "query": "FROM Metric SELECT average(http.server.request.duration) FACET service.name TIMESERIES"
               }
             ]
           }
@@ -164,8 +159,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM Metric SELECT percentile(http.server.request.duration, 50, 95, 99) FACET service.name",
-                "requiresGate": 12
+                "query": "FROM Metric SELECT percentile(http.server.request.duration, 50, 95, 99) FACET service.name"
               }
             ]
           }
@@ -178,8 +172,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' AND http.response.status_code >= 400 AND http.response.status_code < 500 FACET service.name TIMESERIES",
-                "requiresGate": 12
+                "query": "FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' AND http.response.status_code >= 400 AND http.response.status_code < 500 FACET service.name TIMESERIES"
               }
             ]
           }
@@ -192,8 +185,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' AND http.response.status_code >= 500 FACET service.name TIMESERIES",
-                "requiresGate": 12
+                "query": "FROM Metric SELECT count(*) WHERE metricName = 'http.server.request.duration' AND http.response.status_code >= 500 FACET service.name TIMESERIES"
               }
             ]
           }
@@ -219,8 +211,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM Span SELECT average(duration.ms) WHERE span.kind = 'server' FACET name LIMIT 20",
-                "requiresGate": 12
+                "query": "FROM Span SELECT average(duration.ms) WHERE span.kind = 'server' FACET name LIMIT 20"
               }
             ]
           }
@@ -233,8 +224,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM Span SELECT count(*), average(duration.ms) WHERE span.kind = 'client' AND http.request.method IS NOT NULL FACET service.name, server.address",
-                "requiresGate": 12
+                "query": "FROM Span SELECT count(*), average(duration.ms) WHERE span.kind = 'client' AND http.request.method IS NOT NULL FACET service.name, server.address"
               }
             ]
           }
@@ -255,7 +245,7 @@
         },
         {
           "title": "Fluxo distribuido Ordens e Estoque",
-          "_comment": "Atributos emitidos pela instrumentacao AWS, confirmados no gate 8.",
+          "_comment": "Atributos emitidos pela instrumentacao AWS e confirmados pela validacao de borda.",
           "layout": { "column": 1, "row": 10, "width": 12, "height": 3 },
           "visualization": { "id": "viz.table" },
           "rawConfiguration": {
@@ -271,7 +261,7 @@
     },
     {
       "name": "Kubernetes",
-      "description": "Sinais do cluster oficina-k3s. Event types e atributos confirmados pelo gate 11; Kubernetes Events pelo gate 10.",
+      "description": "Sinais do cluster oficina-k3s. Event types e atributos confirmados pela validacao New Relic.",
       "widgets": [
         {
           "title": "CPU do node",
@@ -281,8 +271,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM Metric SELECT average(k8s.node.cpu.usage) WHERE k8s.cluster.name = 'oficina-k3s' FACET k8s.node.name TIMESERIES",
-                "requiresGate": 11
+                "query": "FROM Metric SELECT average(k8s.node.cpu.usage) WHERE k8s.cluster.name = 'oficina-k3s' FACET k8s.node.name TIMESERIES"
               }
             ]
           }
@@ -295,8 +284,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM Metric SELECT average(node.memory.usage.percentage) WHERE k8s.cluster.name = 'oficina-k3s' FACET k8s.node.name TIMESERIES",
-                "requiresGate": 11
+                "query": "FROM Metric SELECT average(node.memory.usage.percentage) WHERE k8s.cluster.name = 'oficina-k3s' FACET k8s.node.name TIMESERIES"
               }
             ]
           }
@@ -323,8 +311,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM Metric SELECT sum(container.cpu.usage) WHERE k8s.cluster.name = 'oficina-k3s' FACET k8s.pod.name TIMESERIES",
-                "requiresGate": 11
+                "query": "FROM Metric SELECT sum(container.cpu.usage) WHERE k8s.cluster.name = 'oficina-k3s' FACET k8s.pod.name TIMESERIES"
               }
             ]
           }
@@ -337,8 +324,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM Metric SELECT average(k8s.pod.memory.working_set) WHERE k8s.cluster.name = 'oficina-k3s' FACET k8s.pod.name TIMESERIES",
-                "requiresGate": 11
+                "query": "FROM Metric SELECT average(k8s.pod.memory.working_set) WHERE k8s.cluster.name = 'oficina-k3s' FACET k8s.pod.name TIMESERIES"
               }
             ]
           }
@@ -351,8 +337,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM Metric SELECT latest(kube_pod_container_status_restarts_total) WHERE k8s.cluster.name = 'oficina-k3s' FACET pod, container",
-                "requiresGate": 11
+                "query": "FROM Metric SELECT latest(kube_pod_container_status_restarts_total) WHERE k8s.cluster.name = 'oficina-k3s' FACET pod, container"
               }
             ]
           }
@@ -365,8 +350,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM Metric SELECT latest(kube_pod_status_ready) WHERE k8s.cluster.name = 'oficina-k3s' AND condition = 'true' FACET pod",
-                "requiresGate": 11
+                "query": "FROM Metric SELECT latest(kube_pod_status_ready) WHERE k8s.cluster.name = 'oficina-k3s' AND condition = 'true' FACET pod"
               }
             ]
           }
@@ -379,8 +363,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM Metric SELECT latest(kube_node_status_condition) WHERE k8s.cluster.name = 'oficina-k3s' AND status = 'true' FACET node, condition",
-                "requiresGate": 11
+                "query": "FROM Metric SELECT latest(kube_node_status_condition) WHERE k8s.cluster.name = 'oficina-k3s' AND status = 'true' FACET node, condition"
               }
             ]
           }
@@ -393,8 +376,7 @@
             "nrqlQueries": [
               {
                 "accountId": "__ACCOUNT_ID__",
-                "query": "FROM Log SELECT count(*) WHERE k8s.cluster.name = 'oficina-k3s' AND k8s.event.reason IS NOT NULL FACET k8s.event.reason, k8s.object.name",
-                "requiresGate": 10
+                "query": "FROM Log SELECT count(*) WHERE k8s.cluster.name = 'oficina-k3s' AND k8s.event.reason IS NOT NULL FACET k8s.event.reason, k8s.object.name"
               }
             ]
           }

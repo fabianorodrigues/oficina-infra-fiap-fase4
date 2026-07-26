@@ -65,10 +65,9 @@ provisioningOrder:
   - Database Bootstrap
   - Auth Deploy
   - Cadastro Deploy
+  - Initial Admin Provision
   - Estoque Deploy
   - Ordens Deploy
   - Entrypoint Deploy
-  - Collection Postman
-
-optionalValidations:
   - Observability Deploy
+  - Collection Postman

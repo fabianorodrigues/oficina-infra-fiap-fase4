@@ -84,10 +84,10 @@ catch {
 # ---------------------------------------------------------------------------
 # Prontidao dos workloads.
 #
-# Um DaemonSet que nunca fica pronto ja passou pelos gates: o Collector nao
+# Um DaemonSet que nunca fica pronto ja passou pelas validacoes: o Collector nao
 # coletava node, pod nem container, e a instalacao foi reportada como concluida.
 # ---------------------------------------------------------------------------
-$gateCompleto = @'
+$validacaoCompleta = @'
 --- pods do newrelic
 NAME                          READY   STATUS    RESTARTS   AGE
 nr-otel-daemonset-rz7nf       1/1     Running   0          2m
@@ -96,17 +96,17 @@ OFICINA_WORKLOAD daemonset/nr-otel-nr-k8s-otel-collector-daemonset pronto=1 dese
 OFICINA_WORKLOAD deployment/nr-otel-nr-k8s-otel-collector-deployment pronto=1 desejado=1
 '@
 
-if (@(Test-CapacityGate -Text $gateCompleto -MinimumAvailableMi 512).Count -ne 0) {
+if (@(Test-CapacityValidation -Text $validacaoCompleta -MinimumAvailableMi 512).Count -ne 0) {
     throw 'Workloads prontos nao podem gerar violacao.'
 }
 
-$gateIncompleto = @'
+$validacaoIncompleta = @'
 --- prontidao dos workloads do Collector
 OFICINA_WORKLOAD daemonset/nr-otel-nr-k8s-otel-collector-daemonset pronto= desejado=1
 OFICINA_WORKLOAD deployment/nr-otel-nr-k8s-otel-collector-deployment pronto=1 desejado=1
 '@
 
-$violacoes = @(Test-CapacityGate -Text $gateIncompleto -MinimumAvailableMi 512)
+$violacoes = @(Test-CapacityValidation -Text $validacaoIncompleta -MinimumAvailableMi 512)
 if ($violacoes.Count -ne 1) {
     throw "DaemonSet sem replica pronta deveria gerar 1 violacao; gerou $($violacoes.Count)."
 }
