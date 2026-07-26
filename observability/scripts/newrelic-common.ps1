@@ -345,14 +345,18 @@ function Resolve-HelmOperation {
 
     if ($Output -match 'OFICINA_RELEASE_STATE=exists') {
         $revision = 0
+        if ($Output -match '(?m)^OFICINA_CURRENT_REVISION=(\d+)\s*$') {
+            $revision = [int]$Matches[1]
+        }
+
         # helm history devolve JSON; a maior revision e a atual.
-        foreach ($match in [regex]::Matches($Output, '"revision"\s*:\s*(\d+)')) {
+        foreach ($match in [regex]::Matches($Output, '"revision"\s*:\s*"?(\d+)"?')) {
             $candidate = [int]$match.Groups[1].Value
             if ($candidate -gt $revision) { $revision = $candidate }
         }
 
         if ($revision -eq 0) {
-            throw 'Release existe mas nenhuma revision pudo ser lida do helm history.'
+            throw 'Release existe mas nenhuma revision pode ser lida do helm status/history/list.'
         }
 
         return [pscustomobject]@{ Kind = 'atualizacao'; CurrentRevision = $revision }

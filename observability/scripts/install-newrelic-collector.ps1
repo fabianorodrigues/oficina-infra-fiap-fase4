@@ -153,27 +153,29 @@ if ($baselinePressure.Count -gt 0) {
 # uninstall de um Collector saudavel.
 # ---------------------------------------------------------------------------
 Write-Step 'Passos 5 e 6: classificando a operacao'
+$helmClassifierPath = Join-Path $PSScriptRoot 'classify-helm-release.sh'
+$helmClassifierContent = Get-Content -LiteralPath $helmClassifierPath -Raw
 $statusOutput = Invoke-NodeScript -InstanceId $instanceId -Region $AwsRegion -Comment 'Helm status' -AllowFailure -Script @"
 set -u
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 export PATH="`$PATH:/usr/local/bin"
-if helm status $($config.Release) --namespace $($config.Namespace) --output json 2>/tmp/helm-status.err; then
-    echo 'OFICINA_RELEASE_STATE=exists'
-    helm history $($config.Release) --namespace $($config.Namespace) --max $($config.HistoryMax) --output json
-else
-    if grep -qiE 'release: not found|not found' /tmp/helm-status.err; then
-        echo 'OFICINA_RELEASE_STATE=absent'
-    else
-        echo 'OFICINA_RELEASE_STATE=unknown'
-        cat /tmp/helm-status.err >&2
-    fi
-fi
+
+work="`$(mktemp -d)"
+trap 'rm -rf "`$work"' EXIT
+
+cat > "`$work/classify-helm-release.sh" <<'OFICINA_HELM_CLASSIFIER_EOF'
+$helmClassifierContent
+OFICINA_HELM_CLASSIFIER_EOF
+chmod 0755 "`$work/classify-helm-release.sh"
+
+sh "`$work/classify-helm-release.sh" '$($config.Release)' '$($config.Namespace)' '$($config.HistoryMax)'
 "@
 
 $operation = Resolve-HelmOperation -Output $statusOutput
 Write-Host "  operacao classificada: $($operation.Kind)"
 if ($operation.Kind -eq 'unknown') {
-    throw 'helm status nao pudo ser interpretado. Erro de conexao, autenticacao ou cluster indisponivel nunca e tratado como release inexistente.'
+    Write-Host $statusOutput
+    throw 'helm status nao pode ser interpretado. Erro de conexao, autenticacao ou cluster indisponivel nunca e tratado como release inexistente.'
 }
 
 if ($ValidationOnly) {
