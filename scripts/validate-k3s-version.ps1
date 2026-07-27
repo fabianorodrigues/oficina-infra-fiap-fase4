@@ -8,12 +8,12 @@
     que o valor parece uma versao de K3s. Arquivos coerentes em formato e
     divergentes em valor passariam por ela. Esta validacao compara o valor
     literal entre config/official.yml, a variavel TF_VAR_k3s_version exportada
-    para o Terraform e a documentacao de deploy.
+    para o Terraform e o README do repositorio.
 #>
 [CmdletBinding()]
 param(
     [string]$ConfigPath = "config/official.yml",
-    [string]$DocsPath = "docs/KUBERNETES-DEPLOYMENT.md",
+    [string]$DocsPath = "README.md",
     [string]$TerraformVersion = $env:TF_VAR_k3s_version
 )
 
@@ -28,7 +28,7 @@ if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "Arquivo de configuracao oficial nao encontrado: $ConfigPath"
 }
 if (-not (Test-Path -LiteralPath $DocsPath)) {
-    throw "Documentacao de deploy nao encontrada: $DocsPath"
+    throw "Documentacao nao encontrada: $DocsPath"
 }
 
 $configRaw = Get-Content -LiteralPath $ConfigPath -Raw
