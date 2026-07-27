@@ -202,11 +202,11 @@ $createCall = @($script:CapturedRestCalls | Where-Object { $_.Method -eq 'Post' 
 if ($null -eq $createCall -or $createCall.Path -ne '/alerts_location_failure_conditions/policies/policy-1.json') {
     throw 'Criacao Synthetic deveria usar o endpoint REST de location failure conditions.'
 }
-if ($createCall.Body.location_failure_condition.monitor_id -ne 'monitor-guid') {
-    throw 'REST de location failure conditions deve receber monitor_id com o GUID do monitor Synthetic.'
+if ($createCall.Body.location_failure_condition.PSObject.Properties['monitor_id']) {
+    throw 'REST de location failure conditions nao documenta monitor_id; use entities com o GUID do monitor Synthetic.'
 }
-if ($createCall.Body.location_failure_condition.PSObject.Properties['entities']) {
-    throw 'REST de location failure conditions nao deve receber entities; use monitor_id.'
+if (@($createCall.Body.location_failure_condition.entities) -notcontains 'monitor-guid') {
+    throw 'REST de location failure conditions exige entities com o GUID do monitor Synthetic.'
 }
 if ($createCall.Body.location_failure_condition.terms[0].priority -ne 'critical') {
     throw 'REST de location failure conditions usa prioridade critical em minusculo.'
