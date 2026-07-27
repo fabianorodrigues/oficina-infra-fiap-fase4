@@ -180,6 +180,52 @@ function Invoke-NerdGraph {
     }
 }
 
+function Get-ObjectPropertyValue {
+    param(
+        [AllowNull()]$Object,
+        [Parameter(Mandatory = $true)][string[]]$Names
+    )
+
+    if ($null -eq $Object) { return $null }
+    foreach ($name in $Names) {
+        $property = $Object.PSObject.Properties[$name]
+        if ($null -ne $property) { return $property.Value }
+    }
+
+    return $null
+}
+
+function Invoke-NewRelicRest {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][ValidateSet('Get', 'Post', 'Put', 'Delete')][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [hashtable]$Body
+    )
+
+    $baseUrl = if ($Context.Region -eq 'EU') { 'https://api.eu.newrelic.com/v2' } else { 'https://api.newrelic.com/v2' }
+    $arguments = @{
+        Uri        = "$baseUrl$Path"
+        Method     = $Method
+        Headers    = @{ 'Api-Key' = $Context.ApiKey; 'Content-Type' = 'application/json' }
+        TimeoutSec = 60
+    }
+
+    if ($PSBoundParameters.ContainsKey('Body')) {
+        $json = $Body | ConvertTo-Json -Depth 25 -Compress
+        $arguments['Body'] = [System.Text.Encoding]::UTF8.GetBytes($json)
+    }
+
+    try {
+        return Invoke-RestMethod @arguments
+    }
+    catch {
+        $status = Get-HttpStatusCode -ErrorRecord $_
+        $descricao = if ($null -eq $status) { $_.Exception.Message } else { "HTTP ${status}: $($_.Exception.Message)" }
+        throw "New Relic REST falhou ($Method $Path): $descricao"
+    }
+}
+
 function Assert-NoMutationErrors {
     param(
         [Parameter(Mandatory = $true)]$Payload,
@@ -354,31 +400,32 @@ function Set-SyntheticCondition {
         [Parameter(Mandatory = $true)][string]$MonitorGuid
     )
 
-    # Tres falhas consecutivas por localizacao e o comportamento nativo do
-    # Synthetic Monitor. O enunciado pede duas; o desvio esta registrado no
-    # relatorio de implementacao, porque duas exigiria uma condicao NRQL paralela
-    # sobre SyntheticCheck, duplicando a fonte do mesmo alerta.
+    # A NerdGraph atual nao lista condicoes Synthetic multi-location no namespace
+    # alerts; a propria documentacao da New Relic ainda direciona este tipo para
+    # o REST v2 alerts_location_failure_conditions.
     $conditionInput = @{
-        name                      = $Condition.name
-        enabled                   = $true
-        entities                  = @($MonitorGuid)
-        terms                     = @(@{ priority = 'CRITICAL'; threshold = [int]$Condition.criticalThreshold })
-        violationTimeLimitSeconds = [int]$Condition.violationTimeLimitSeconds
+        name                         = $Condition.name
+        enabled                      = $true
+        entities                     = @($MonitorGuid)
+        terms                        = @(@{ priority = 'critical'; threshold = [int]$Condition.criticalThreshold })
+        violation_time_limit_seconds = [int]$Condition.violationTimeLimitSeconds
     }
 
     $existingConditions = @(Find-LocationConditions -Context $Context -PolicyId $PolicyId -Name $Condition.name)
 
     if ($existingConditions.Count -eq 0) {
-        $created = Invoke-NerdGraph -Context $Context -Query @'
-mutation($accountId: Int!, $policyId: ID!, $condition: AlertsSyntheticsMultiLocationConditionInput!) {
-  alertsSyntheticsMultiLocationConditionCreate(accountId: $accountId, policyId: $policyId, condition: $condition) { id name }
-}
-'@ -Variables @{
-            accountId = [int]$Context.AccountId
-            policyId  = $PolicyId
-            condition = $conditionInput
+        $created = Invoke-NewRelicRest `
+            -Context $Context `
+            -Method Post `
+            -Path "/alerts_location_failure_conditions/policies/$PolicyId.json" `
+            -Body @{ location_failure_condition = $conditionInput }
+        $createdCondition = Get-ObjectPropertyValue -Object $created -Names @('location_failure_condition')
+        if ($null -eq $createdCondition) { $createdCondition = $created }
+        $createdId = Get-ObjectPropertyValue -Object $createdCondition -Names @('id')
+        if ([string]::IsNullOrWhiteSpace([string]$createdId)) {
+            throw "REST create da condicao Synthetic '$($Condition.name)' nao retornou id."
         }
-        return @([pscustomobject]@{ Guid = $created.data.alertsSyntheticsMultiLocationConditionCreate.id; Action = 'created' })
+        return @([pscustomobject]@{ Guid = $createdId; Action = 'created' })
     }
 
     if ($existingConditions.Count -gt 1) {
@@ -388,16 +435,16 @@ mutation($accountId: Int!, $policyId: ID!, $condition: AlertsSyntheticsMultiLoca
 
     $updates = @()
     foreach ($existing in $existingConditions) {
-        $updated = Invoke-NerdGraph -Context $Context -Query @'
-mutation($accountId: Int!, $id: ID!, $condition: AlertsSyntheticsMultiLocationConditionUpdateInput!) {
-  alertsSyntheticsMultiLocationConditionUpdate(accountId: $accountId, id: $id, condition: $condition) { id name }
-}
-'@ -Variables @{
-        accountId = [int]$Context.AccountId
-        id        = $existing.id
-        condition = $conditionInput
-    }
-        $updates += [pscustomobject]@{ Guid = $updated.data.alertsSyntheticsMultiLocationConditionUpdate.id; Action = 'updated' }
+        $updated = Invoke-NewRelicRest `
+            -Context $Context `
+            -Method Put `
+            -Path "/alerts_location_failure_conditions/$($existing.id).json" `
+            -Body @{ location_failure_condition = $conditionInput }
+        $updatedCondition = Get-ObjectPropertyValue -Object $updated -Names @('location_failure_condition')
+        if ($null -eq $updatedCondition) { $updatedCondition = $updated }
+        $updatedId = Get-ObjectPropertyValue -Object $updatedCondition -Names @('id')
+        if ([string]::IsNullOrWhiteSpace([string]$updatedId)) { $updatedId = $existing.id }
+        $updates += [pscustomobject]@{ Guid = $updatedId; Action = 'updated' }
     }
 
     return @($updates)
@@ -410,19 +457,13 @@ function Find-LocationConditions {
         [Parameter(Mandatory = $true)][string]$Name
     )
 
-    $response = Invoke-NerdGraph -Context $Context -Query @'
-query($accountId: Int!, $policyId: ID!) {
-  actor { account(id: $accountId) { alerts {
-    syntheticsMultiLocationConditionsSearch(searchCriteria: {policyId: $policyId}) {
-      conditions { id name policyId }
-    }
-  } } }
-}
-'@ -Variables @{ accountId = [int]$Context.AccountId; policyId = $PolicyId }
+    $response = Invoke-NewRelicRest -Context $Context -Method Get -Path "/alerts_location_failure_conditions/policies/$PolicyId.json"
+    $itemsValue = Get-ObjectPropertyValue -Object $response -Names @('location_failure_conditions', 'conditions')
+    $items = if ($null -eq $itemsValue) { @() } else { @($itemsValue) }
 
-    $conditions = @($response.data.actor.account.alerts.syntheticsMultiLocationConditionsSearch.conditions |
-        Where-Object { $_.name -eq $Name } |
-        Sort-Object { [string]$_.id })
+    $conditions = @($items |
+        Where-Object { (Get-ObjectPropertyValue -Object $_ -Names @('name')) -eq $Name } |
+        Sort-Object { [string](Get-ObjectPropertyValue -Object $_ -Names @('id')) })
 
     return @($conditions)
 }
