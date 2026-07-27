@@ -145,4 +145,28 @@ foreach ($arquivo in @('install-newrelic-collector.ps1', 'newrelic-common.ps1', 
     }
 }
 
+# ---------------------------------------------------------------------------
+# Fallback da license key em ambientes restritos.
+#
+# O AWS Academy pode negar ssm:PutParameter para o principal do runner. Esse caso
+# precisa degradar para criacao direta do Secret pelo Run Command, em vez de
+# interromper o deploy antes do Helm.
+# ---------------------------------------------------------------------------
+$installScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'install-newrelic-collector.ps1') -Raw
+foreach ($requiredSnippet in @(
+        '$licenseDeliveryMode = ''parameter-store''',
+        '$licenseDeliveryMode = ''run-command-fallback''',
+        'New-LicenseParameter -Name $parameterName -Value $LicenseKey -Region $AwsRegion',
+        '[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($LicenseKey))',
+        'license_data=$licenseDataExpression'
+    )) {
+    if (-not $installScript.Contains($requiredSnippet)) {
+        throw "Fallback de license key sem PutParameter incompleto. Trecho ausente: $requiredSnippet"
+    }
+}
+
+if ($installScript -notmatch '(?s)try\s*\{.*?Test-ObservabilityPermissions.*?New-LicenseParameter.*?\}\s*catch\s*\{.*?run-command-fallback') {
+    throw 'Fallback de license key precisa capturar falha de permissao/PutParameter e seguir com run-command-fallback.'
+}
+
 Write-Host 'Contrato Helm operation offline aprovado.'
