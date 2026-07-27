@@ -12,15 +12,16 @@
       4. Capturar baseline de capacidade do node.
       5. Executar helm status.
       6. Classificar a operacao.
-      7. Criar o SecureString temporario.
+      7. Criar o SecureString temporario ou selecionar fallback sem Parameter Store.
       8. Criar o Secret Kubernetes versionado.
       9. Executar helm template com post-renderer.
      10. Executar helm upgrade --install.
      11. Executar as validacoes pos-instalacao.
 
-    A license key nunca aparece no corpo do Run Command: ela vai para um
-    SecureString em /oficina/deploy/newrelic/* e e lida dentro da EC2, que e o
-    unico principal com kms:Decrypt nesse caminho.
+    A rota preferencial envia a license key por SecureString em
+    /oficina/deploy/newrelic/* e a le dentro da EC2. Em ambientes AWS Academy onde
+    o principal do runner nao tem ssm:PutParameter, o script usa fallback e aplica
+    o Secret Kubernetes versionado diretamente por Run Command.
 #>
 [CmdletBinding()]
 param(
@@ -205,15 +206,30 @@ $parameterCreated = $false
 $instalacaoConcluida = $false
 try {
     Write-Step 'Passo 7: SecureString temporario da license key'
-    Test-ObservabilityPermissions -Region $AwsRegion -InstanceId $instanceId -ParameterPrefix $config.LicenseParameterPrefix
-    New-LicenseParameter -Name $parameterName -Value $LicenseKey -Region $AwsRegion
-    $parameterCreated = $true
+    $licenseDeliveryMode = 'parameter-store'
+    try {
+        Test-ObservabilityPermissions -Region $AwsRegion -InstanceId $instanceId -ParameterPrefix $config.LicenseParameterPrefix
+        New-LicenseParameter -Name $parameterName -Value $LicenseKey -Region $AwsRegion
+        $parameterCreated = $true
+    }
+    catch {
+        $licenseDeliveryMode = 'run-command-fallback'
+        Write-Host "  SecureString indisponivel: $($_.Exception.Message)"
+        Write-Host '  Usando fallback para ambiente restrito: a license key sera aplicada diretamente como Secret Kubernetes pelo Run Command.'
+    }
 
     Write-Step "Passo 8: namespace e Secret versionado $secretName"
     # O nome do Secret carrega o run-id de proposito. Um Secret estavel sobrescrito
     # a cada execucao inviabiliza rollback: a revisao anterior do Helm passaria a
     # apontar para uma licenca que nao existe mais com aquele conteudo.
+    Write-Host "  modo de entrega da license key: $licenseDeliveryMode"
     Write-Host "::add-mask::$LicenseKey"
+    $licenseDataExpression = "`$(aws ssm get-parameter --name '$parameterName' --with-decryption --region '$AwsRegion' --query Parameter.Value --output text | tr -d '\n' | base64 -w0)"
+    if ($licenseDeliveryMode -eq 'run-command-fallback') {
+        $licenseKeyBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($LicenseKey))
+        Write-Host "::add-mask::$licenseKeyBase64"
+        $licenseDataExpression = "'$licenseKeyBase64'"
+    }
 
     Invoke-NodeScript -InstanceId $instanceId -Region $AwsRegion -Comment 'Secret da licenca' -Script @"
 set -eu
@@ -227,14 +243,15 @@ secret_file="`$(mktemp)"
 cleanup() { shred -u "`$secret_file" 2>/dev/null || rm -f "`$secret_file"; }
 trap cleanup EXIT
 
-license_data="`$(aws ssm get-parameter --name '$parameterName' --with-decryption --region '$AwsRegion' --query Parameter.Value --output text | tr -d '\n' | base64 -w0)"
+license_data=$licenseDataExpression
 if [ -z "`$license_data" ]; then
     echo 'license key vazia depois da resolucao.' >&2
     exit 1
 fi
 
 # printf e builtin e base64 le da entrada padrao: nenhum valor secreto aparece na
-# linha de comando de um processo.
+# linha de comando de um processo. No fallback, license_data ja chega em base64
+# porque o runner nao tem permissao para criar SecureString temporario.
 printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: %s\n  namespace: %s\n  labels:\n    app.kubernetes.io/name: $($config.LicenseSecretPrefix)\n    app.kubernetes.io/managed-by: fiap-fase4\n    oficina.run-id: "%s"\ntype: Opaque\ndata:\n  %s: %s\n' \
     '$secretName' '$($config.Namespace)' '$RunId' '$($config.LicenseSecretKey)' \
     "`$license_data" \
