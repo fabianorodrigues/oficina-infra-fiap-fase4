@@ -22,6 +22,7 @@ Set-StrictMode -Version Latest
 
 $clientPath = Join-Path $PSScriptRoot 'nerdgraph-client.ps1'
 $provisionPath = Join-Path $PSScriptRoot 'provision-newrelic.ps1'
+$validatePath = Join-Path $PSScriptRoot 'validate-newrelic.ps1'
 
 . $clientPath
 
@@ -69,8 +70,6 @@ $script:MutationArgumentContract = @{
     'alertsPolicyUpdate'                           = @('accountId', 'id', 'policy')
     'alertsNrqlConditionStaticCreate'              = @('accountId', 'policyId', 'condition')
     'alertsNrqlConditionStaticUpdate'              = @('accountId', 'id', 'condition')
-    'alertsSyntheticsMultiLocationConditionCreate' = @('accountId', 'policyId', 'condition')
-    'alertsSyntheticsMultiLocationConditionUpdate' = @('accountId', 'id', 'condition')
     'dashboardCreate'                              = @('accountId', 'dashboard')
     'dashboardUpdate'                              = @('guid', 'dashboard')
     'syntheticsCreateSimpleMonitor'                = @('accountId', 'monitor')
@@ -114,8 +113,12 @@ function Assert-MutationArgumentsSafe {
 
 foreach ($arquivo in @(
         @{ Path = $clientPath; Label = 'nerdgraph-client.ps1' },
-        @{ Path = $provisionPath; Label = 'provision-newrelic.ps1' })) {
+        @{ Path = $provisionPath; Label = 'provision-newrelic.ps1' },
+        @{ Path = $validatePath; Label = 'validate-newrelic.ps1' })) {
     $conteudo = Get-Content -LiteralPath $arquivo.Path -Raw
+    if ($conteudo -match 'syntheticsMultiLocationConditionsSearch|alertsSyntheticsMultiLocationCondition') {
+        throw "$($arquivo.Label) usa Synthetic multi-location via NerdGraph. Use REST v2 alerts_location_failure_conditions."
+    }
     Assert-ErrorsSelectionSafe -Content $conteudo -Label $arquivo.Label
     Assert-MutationArgumentsSafe -Content $conteudo -Label $arquivo.Label
 }

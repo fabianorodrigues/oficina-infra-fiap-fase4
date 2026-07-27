@@ -25,7 +25,9 @@ function Convert-ToObject {
 
 $script:ExistingEntities = @()
 $script:ExistingNrqlConditions = @()
+$script:ExistingLocationConditions = @()
 $script:CapturedMutations = [System.Collections.Generic.List[object]]::new()
+$script:CapturedRestCalls = [System.Collections.Generic.List[object]]::new()
 
 function Invoke-NerdGraph {
     param(
@@ -54,6 +56,42 @@ function Invoke-NerdGraph {
     }
 
     throw "Query nao simulada no teste de upsert: $Query"
+}
+
+function Invoke-NewRelicRest {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [hashtable]$Body
+    )
+
+    $script:CapturedRestCalls.Add([pscustomobject]@{ Method = $Method; Path = $Path; Body = $Body }) | Out-Null
+
+    if ($Method -eq 'Get' -and $Path -match '^/alerts_location_failure_conditions/policies/(?<policyId>[^/]+)\.json$') {
+        return Convert-ToObject @{ location_failure_conditions = $script:ExistingLocationConditions }
+    }
+
+    if ($Method -eq 'Post' -and $Path -match '^/alerts_location_failure_conditions/policies/(?<policyId>[^/]+)\.json$') {
+        return Convert-ToObject @{
+            location_failure_condition = @{
+                id        = 'synthetic-created'
+                name      = $Body.location_failure_condition.name
+                policy_id = $Matches['policyId']
+            }
+        }
+    }
+
+    if ($Method -eq 'Put' -and $Path -match '^/alerts_location_failure_conditions/(?<conditionId>[^/]+)\.json$') {
+        return Convert-ToObject @{
+            location_failure_condition = @{
+                id   = $Matches['conditionId']
+                name = $Body.location_failure_condition.name
+            }
+        }
+    }
+
+    throw "REST nao simulado no teste de upsert: $Method $Path"
 }
 
 function New-TestContext {
@@ -141,6 +179,62 @@ if (@($script:CapturedMutations | Where-Object { $_.Kind -eq 'create' }).Count -
 }
 if (@(Get-NerdGraphWarnings -Context $context).Count -ne 1) {
     throw 'Condicoes duplicadas deveriam registrar exactly 1 warning.'
+}
+
+# Condicao Synthetic multi-location: usa REST v2 porque NerdGraph nao oferece a
+# listagem deste tipo no namespace alerts.
+$synthetic = Convert-ToObject @{
+    name                      = 'Oficina - Synthetic REST'
+    type                      = 'SYNTHETIC_MULTI_LOCATION'
+    monitorName               = 'Oficina - Health'
+    criticalThreshold         = 1
+    violationTimeLimitSeconds = 3600
+}
+
+$context = New-TestContext
+$script:CapturedRestCalls.Clear()
+$script:ExistingLocationConditions = @()
+$result = @(Set-SyntheticCondition -Context $context -PolicyId 'policy-1' -Condition $synthetic -MonitorGuid 'monitor-guid')
+if ($result.Count -ne 1 -or $result[0].Action -ne 'created' -or $result[0].Guid -ne 'synthetic-created') {
+    throw 'Set-SyntheticCondition deveria criar via REST quando nao existe.'
+}
+$createCall = @($script:CapturedRestCalls | Where-Object { $_.Method -eq 'Post' }) | Select-Object -First 1
+if ($null -eq $createCall -or $createCall.Path -ne '/alerts_location_failure_conditions/policies/policy-1.json') {
+    throw 'Criacao Synthetic deveria usar o endpoint REST de location failure conditions.'
+}
+if ($createCall.Body.location_failure_condition.terms[0].priority -ne 'critical') {
+    throw 'REST de location failure conditions usa prioridade critical em minusculo.'
+}
+if ($createCall.Body.location_failure_condition.PSObject.Properties['violationTimeLimitSeconds']) {
+    throw 'REST de location failure conditions deve usar violation_time_limit_seconds, nao camelCase.'
+}
+
+$context = New-TestContext
+$script:CapturedRestCalls.Clear()
+$script:ExistingLocationConditions = @(@{ id = 'synthetic-1'; name = $synthetic.name; policy_id = 'policy-1' })
+$result = @(Set-SyntheticCondition -Context $context -PolicyId 'policy-1' -Condition $synthetic -MonitorGuid 'monitor-guid')
+if ($result.Count -ne 1 -or $result[0].Action -ne 'updated' -or $result[0].Guid -ne 'synthetic-1') {
+    throw 'Set-SyntheticCondition deveria atualizar via REST quando a condicao existe.'
+}
+if (@($script:CapturedRestCalls | Where-Object { $_.Method -eq 'Put' }).Count -ne 1) {
+    throw 'Cenario com uma Synthetic existente deveria executar exatamente 1 PUT.'
+}
+
+$context = New-TestContext
+$script:CapturedRestCalls.Clear()
+$script:ExistingLocationConditions = @(
+    @{ id = 'synthetic-b'; name = $synthetic.name; policy_id = 'policy-1' },
+    @{ id = 'synthetic-a'; name = $synthetic.name; policy_id = 'policy-1' }
+)
+$result = @(Set-SyntheticCondition -Context $context -PolicyId 'policy-1' -Condition $synthetic -MonitorGuid 'monitor-guid')
+if ($result.Count -ne 2 -or @($result | Where-Object { $_.Action -ne 'updated' }).Count -gt 0) {
+    throw 'Condicoes Synthetic duplicadas deveriam ser atualizadas em conjunto sem falhar.'
+}
+if (@($script:CapturedRestCalls | Where-Object { $_.Method -eq 'Put' }).Count -ne 2) {
+    throw 'Cenario Synthetic duplicado deveria executar 2 PUTs.'
+}
+if (@(Get-NerdGraphWarnings -Context $context).Count -ne 1) {
+    throw 'Synthetic duplicada deveria registrar exactly 1 warning.'
 }
 
 Write-Host 'Contrato de upsert New Relic aprovado.'

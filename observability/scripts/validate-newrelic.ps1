@@ -590,17 +590,9 @@ query($accountId: Int!, $name: String!) {
 
         $expectedSyntheticConditions = @('Oficina Cadastro - Health Failure', 'Oficina Estoque - Health Failure', 'Oficina Ordens - Health Failure')
         if ($syntheticsExpected) {
-            $conditions = Invoke-NerdGraph -Context $context -Query @'
-query($accountId: Int!, $policyId: ID!) {
-  actor { account(id: $accountId) { alerts {
-    syntheticsMultiLocationConditionsSearch(searchCriteria: {policyId: $policyId}) {
-      conditions { id name policyId entities }
-    }
-  } } }
-}
-'@ -Variables @{ accountId = [int]$AccountId; policyId = $policyId }
-
-            $monitorConditions = @($conditions.data.actor.account.alerts.syntheticsMultiLocationConditionsSearch.conditions)
+            $conditionsResponse = Invoke-NewRelicRest -Context $context -Method Get -Path "/alerts_location_failure_conditions/policies/$policyId.json"
+            $conditionsValue = Get-ObjectPropertyValue -Object $conditionsResponse -Names @('location_failure_conditions', 'conditions')
+            $monitorConditions = if ($null -eq $conditionsValue) { @() } else { @($conditionsValue) }
             foreach ($expected in $expectedSyntheticConditions) {
                 $found = @($monitorConditions | Where-Object { $_.name -eq $expected })
                 if ($found.Count -eq 0) {
