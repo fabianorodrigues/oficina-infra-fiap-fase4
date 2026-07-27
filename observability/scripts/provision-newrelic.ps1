@@ -173,9 +173,9 @@ mutation($accountId: Int!, $id: ID!, $policy: AlertsPolicyUpdateInput!) {
 # ---------------------------------------------------------------------------
 # Synthetic Monitors.
 #
-# Criados antes das condicoes: a condicao de Synthetic precisa do GUID do monitor.
+# Criados antes das condicoes: a condicao REST de Synthetic precisa do monitorId.
 # ---------------------------------------------------------------------------
-$monitorGuids = @{}
+$monitorIds = @{}
 Write-Step 'Synthetic Monitors'
 $synthetics = (Get-Content -LiteralPath $syntheticsPath -Raw).Replace('__API_URL__', $ApiUrl.TrimEnd('/')) | ConvertFrom-Json
 $monitorTags = @($synthetics.tags | ForEach-Object { @{ key = $_.key; values = @($_.values) } })
@@ -218,7 +218,7 @@ mutation($guid: EntityGuid!, $monitor: SyntheticsUpdateSimpleMonitorInput!) {
         Add-Result 'Monitor' $monitor.name $guid 'updated'
     }
 
-    $monitorGuids[$monitor.name] = $guid
+    $monitorIds[$monitor.name] = Get-SyntheticMonitorId -Context $context -Name $monitor.name
 }
 
 # ---------------------------------------------------------------------------
@@ -227,11 +227,11 @@ mutation($guid: EntityGuid!, $monitor: SyntheticsUpdateSimpleMonitorInput!) {
 Write-Step 'Condicoes de alerta'
 foreach ($condition in $alerts.conditions) {
     if ($condition.type -eq 'SYNTHETIC_MULTI_LOCATION') {
-        if (-not $monitorGuids.ContainsKey($condition.monitorName)) {
+        if (-not $monitorIds.ContainsKey($condition.monitorName)) {
             throw "Condicao '$($condition.name)' referencia monitor inexistente no arquivo de Synthetics: $($condition.monitorName)."
         }
 
-        foreach ($guid in @(Set-SyntheticCondition -Context $context -PolicyId $policyId -Condition $condition -MonitorGuid $monitorGuids[$condition.monitorName])) {
+        foreach ($guid in @(Set-SyntheticCondition -Context $context -PolicyId $policyId -Condition $condition -MonitorId $monitorIds[$condition.monitorName])) {
             Add-Result 'Condicao' $condition.name $guid.Guid $guid.Action
         }
         continue

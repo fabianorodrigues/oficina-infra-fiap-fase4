@@ -272,12 +272,51 @@ function Find-SingleEntity {
 
     $response = Invoke-NerdGraph -Context $Context -Query @'
 query($query: String!) {
-  actor { entitySearch(query: $query) { results { entities { guid name entityType } } } }
+  actor { entitySearch(query: $query) { results { entities {
+    guid
+    name
+    entityType
+    ... on SyntheticMonitorEntityOutline { monitorId }
+  } } } }
 }
 '@ -Variables @{ query = $Query }
 
     $entities = @($response.data.actor.entitySearch.results.entities)
     return Select-CanonicalResource -Context $Context -Resources $entities -Label "$Label para a busca [$Query]"
+}
+
+<#
+O guid da entidade NerdGraph nao e o identificador usado pelo REST v2 legado de
+alertas Synthetic. Para esse endpoint, o alvo precisa ser o monitorId/domainId
+do monitor Synthetic.
+#>
+function Get-SyntheticMonitorId {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [ValidateRange(1, 10)][int]$MaxAttempts = 6,
+        [ValidateRange(0, 30)][int]$RetryDelaySeconds = 5
+    )
+
+    $lastDetail = 'monitor nao encontrado'
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $monitor = Find-SingleEntity -Context $Context -Query "name = '$Name' AND type = 'MONITOR'" -Label 'monitor'
+        if ($null -ne $monitor) {
+            $monitorId = Get-ObjectPropertyValue -Object $monitor -Names @('monitorId')
+            if (-not [string]::IsNullOrWhiteSpace([string]$monitorId)) {
+                return [string]$monitorId
+            }
+
+            $entityGuid = Get-ObjectPropertyValue -Object $monitor -Names @('guid')
+            $lastDetail = "entidade $entityGuid encontrada, mas sem monitorId"
+        }
+
+        if ($attempt -lt $MaxAttempts -and $RetryDelaySeconds -gt 0) {
+            Start-Sleep -Seconds $RetryDelaySeconds
+        }
+    }
+
+    throw "Monitor Synthetic '$Name' nao retornou monitorId apos $MaxAttempts tentativa(s): $lastDetail."
 }
 
 function Set-NrqlCondition {
@@ -399,7 +438,7 @@ function Set-SyntheticCondition {
         [Parameter(Mandatory = $true)]$Context,
         [Parameter(Mandatory = $true)][string]$PolicyId,
         [Parameter(Mandatory = $true)]$Condition,
-        [Parameter(Mandatory = $true)][string]$MonitorGuid
+        [Parameter(Mandatory = $true)][string]$MonitorId
     )
 
     # A NerdGraph atual nao lista condicoes Synthetic multi-location no namespace
@@ -408,7 +447,7 @@ function Set-SyntheticCondition {
     $conditionInput = @{
         name                         = $Condition.name
         enabled                      = $true
-        entities                     = @($MonitorGuid)
+        entities                     = @($MonitorId)
         terms                        = @(@{ priority = 'critical'; threshold = [int]$Condition.criticalThreshold })
         violation_time_limit_seconds = [int]$Condition.violationTimeLimitSeconds
     }

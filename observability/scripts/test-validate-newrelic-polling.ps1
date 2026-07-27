@@ -81,6 +81,25 @@ if ($conteudo -match '(?i)FROM\s+K8s\w*Sample') {
     throw 'validate-newrelic.ps1 consulta K8s*Sample, que o nr-k8s-otel-collector nao produz. Use as metricas k8s.* em Metric.'
 }
 
+# Logs, campos de log, spans e metricas HTTP dependem da mesma ingestao das
+# chamadas de /health feitas no inicio da validacao. Polling sequencial para cada
+# um deles multiplica o timeout quando a telemetria esta ausente.
+if ($conteudo -notmatch 'function\s+Wait-ForApiSignals') {
+    throw 'validate-newrelic.ps1 precisa de Wait-ForApiSignals para validar sinais de API em polling compartilhado.'
+}
+if ($conteudo -notmatch 'Wait-ForApiSignals\s+-CorrelationId') {
+    throw 'validate-newrelic.ps1 nao usa Wait-ForApiSignals na secao de sinais das APIs.'
+}
+foreach ($nome in @(
+        'Logs dos tres servicos com o correlationId',
+        'Campos de log no nivel superior',
+        'Span da API de origem com o correlationId',
+        'Metricas HTTP dos tres servicos')) {
+    if ($conteudo -match "Wait-ForSignal\s+-Name '$([regex]::Escape($nome))'") {
+        throw "Sinal '$nome' voltou a usar polling sequencial. Use Wait-ForApiSignals."
+    }
+}
+
 . (Join-Path $PSScriptRoot 'newrelic-common.ps1')
 
 $linha = [pscustomobject]@{ 'uniqueCount.service.instance.id' = 3; 'facet' = 'oficina-cadastro' }
