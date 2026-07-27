@@ -139,6 +139,24 @@ if (@(Get-NerdGraphWarnings -Context $context).Count -ne 1) {
     throw 'Duplicidade de entidade deveria registrar exatamente 1 warning.'
 }
 
+# Monitor Synthetic: o alerta REST v2 usa monitorId, nao o EntityGuid do NerdGraph.
+$context = New-TestContext
+$script:ExistingEntities = @(@{ guid = 'entity-guid'; name = 'Oficina - Health'; entityType = 'MONITOR'; monitorId = 'monitor-id' })
+$monitorId = Get-SyntheticMonitorId -Context $context -Name 'Oficina - Health' -MaxAttempts 1
+if ($monitorId -ne 'monitor-id') {
+    throw "Get-SyntheticMonitorId nao devolveu monitorId: $monitorId"
+}
+
+$context = New-TestContext
+$script:ExistingEntities = @(@{ guid = 'entity-guid'; name = 'Oficina - Health'; entityType = 'MONITOR' })
+try {
+    Get-SyntheticMonitorId -Context $context -Name 'Oficina - Health' -MaxAttempts 1 | Out-Null
+    throw 'Get-SyntheticMonitorId deveria reprovar monitor sem monitorId.'
+}
+catch {
+    if ($_.Exception.Message -notmatch 'monitorId') { throw }
+}
+
 # Condicao NRQL: zero cria.
 $context = New-TestContext
 $script:CapturedMutations.Clear()
@@ -194,7 +212,7 @@ $synthetic = Convert-ToObject @{
 $context = New-TestContext
 $script:CapturedRestCalls.Clear()
 $script:ExistingLocationConditions = @()
-$result = @(Set-SyntheticCondition -Context $context -PolicyId 'policy-1' -Condition $synthetic -MonitorGuid 'monitor-guid')
+$result = @(Set-SyntheticCondition -Context $context -PolicyId 'policy-1' -Condition $synthetic -MonitorId 'monitor-id')
 if ($result.Count -ne 1 -or $result[0].Action -ne 'created' -or $result[0].Guid -ne 'synthetic-created') {
     throw 'Set-SyntheticCondition deveria criar via REST quando nao existe.'
 }
@@ -203,10 +221,10 @@ if ($null -eq $createCall -or $createCall.Path -ne '/alerts_location_failure_con
     throw 'Criacao Synthetic deveria usar o endpoint REST de location failure conditions.'
 }
 if ($createCall.Body.location_failure_condition.PSObject.Properties['monitor_id']) {
-    throw 'REST de location failure conditions nao documenta monitor_id; use entities com o GUID do monitor Synthetic.'
+    throw 'REST de location failure conditions nao documenta monitor_id; use entities com o monitorId do monitor Synthetic.'
 }
-if (@($createCall.Body.location_failure_condition.entities) -notcontains 'monitor-guid') {
-    throw 'REST de location failure conditions exige entities com o GUID do monitor Synthetic.'
+if (@($createCall.Body.location_failure_condition.entities) -notcontains 'monitor-id') {
+    throw 'REST de location failure conditions exige entities com o monitorId do monitor Synthetic.'
 }
 if ($createCall.Body.location_failure_condition.terms[0].priority -ne 'critical') {
     throw 'REST de location failure conditions usa prioridade critical em minusculo.'
@@ -218,7 +236,7 @@ if ($createCall.Body.location_failure_condition.PSObject.Properties['violationTi
 $context = New-TestContext
 $script:CapturedRestCalls.Clear()
 $script:ExistingLocationConditions = @(@{ id = 'synthetic-1'; name = $synthetic.name; policy_id = 'policy-1' })
-$result = @(Set-SyntheticCondition -Context $context -PolicyId 'policy-1' -Condition $synthetic -MonitorGuid 'monitor-guid')
+$result = @(Set-SyntheticCondition -Context $context -PolicyId 'policy-1' -Condition $synthetic -MonitorId 'monitor-id')
 if ($result.Count -ne 1 -or $result[0].Action -ne 'updated' -or $result[0].Guid -ne 'synthetic-1') {
     throw 'Set-SyntheticCondition deveria atualizar via REST quando a condicao existe.'
 }
@@ -232,7 +250,7 @@ $script:ExistingLocationConditions = @(
     @{ id = 'synthetic-b'; name = $synthetic.name; policy_id = 'policy-1' },
     @{ id = 'synthetic-a'; name = $synthetic.name; policy_id = 'policy-1' }
 )
-$result = @(Set-SyntheticCondition -Context $context -PolicyId 'policy-1' -Condition $synthetic -MonitorGuid 'monitor-guid')
+$result = @(Set-SyntheticCondition -Context $context -PolicyId 'policy-1' -Condition $synthetic -MonitorId 'monitor-id')
 if ($result.Count -ne 2 -or @($result | Where-Object { $_.Action -ne 'updated' }).Count -gt 0) {
     throw 'Condicoes Synthetic duplicadas deveriam ser atualizadas em conjunto sem falhar.'
 }

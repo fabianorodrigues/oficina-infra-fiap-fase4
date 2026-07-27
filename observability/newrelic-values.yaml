@@ -89,26 +89,28 @@ deployment:
     # mesmo componente e erro de configuracao do Collector.
     # Aqui so entram as pipelines dedicadas, referenciando os componentes
     # existentes pelo nome real, confirmado no manifesto da versao fixada.
+    # No chart, extraConfig.pipelines e mapeado para service.pipelines; se
+    # aninhar em extraConfig.service.pipelines, o Helm renderiza sem estas
+    # pipelines e os spans/metricas OTLP das APIs somem.
     # Nao existe pipeline de logs vinda de OTLP.
     extraConfig:
-      service:
-        pipelines:
-          traces/oficina:
-            receivers:
-              - otlp
-            processors:
-              - memory_limiter
-              - batch
-            exporters:
-              - otlp_http/newrelic
-          metrics/oficina:
-            receivers:
-              - otlp
-            processors:
-              - memory_limiter
-              - batch
-            exporters:
-              - otlp_http/newrelic
+      pipelines:
+        traces/oficina:
+          receivers:
+            - otlp
+          processors:
+            - memory_limiter
+            - batch
+          exporters:
+            - otlp_http/newrelic
+        metrics/oficina:
+          receivers:
+            - otlp
+          processors:
+            - memory_limiter
+            - batch
+          exporters:
+            - otlp_http/newrelic
 
 kube-state-metrics:
   enabled: true

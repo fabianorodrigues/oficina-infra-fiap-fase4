@@ -162,6 +162,154 @@ function Wait-ForSignal {
     return $false
 }
 
+function Get-ApiSignalChecks {
+    param(
+        [Parameter(Mandatory = $true)][string]$CorrelationId,
+        [Parameter(Mandatory = $true)][string[]]$Services
+    )
+
+    $checks = [ordered]@{}
+
+    try {
+        $rows = Invoke-Nrql -Query @"
+FROM Log SELECT count(*)
+WHERE correlationId = '$CorrelationId'
+FACET service.name
+SINCE 10 minutes ago
+"@
+        $found = @(@($rows | ForEach-Object { Get-NrqlValue -Row $_ -Name 'facet' } | Where-Object { $null -ne $_ }) | Sort-Object -Unique)
+        $missing = @($Services | Where-Object { $found -notcontains $_ })
+        $checks['Logs dos tres servicos com o correlationId'] = [pscustomobject]@{
+            Ok     = $missing.Count -eq 0
+            Detail = if ($missing.Count -eq 0) { "3 servicos: $($found -join ', ')" } else { "faltam: $($missing -join ', ')" }
+        }
+    }
+    catch {
+        $checks['Logs dos tres servicos com o correlationId'] = [pscustomobject]@{ Ok = $false; Detail = $_.Exception.Message }
+    }
+
+    try {
+        $rows = Invoke-Nrql -Query @"
+FROM Log SELECT count(service.name) AS 'servico', count(service.version) AS 'versao',
+count(deployment.environment) AS 'ambiente', count(correlationId) AS 'correlacao',
+count(trace.id) AS 'trace', count(span.id) AS 'span'
+WHERE correlationId = '$CorrelationId'
+SINCE 10 minutes ago
+"@
+        $colunas = [ordered]@{
+            'service.name'           = 'servico'
+            'service.version'        = 'versao'
+            'deployment.environment' = 'ambiente'
+            'correlationId'          = 'correlacao'
+            'trace.id'               = 'trace'
+            'span.id'                = 'span'
+        }
+
+        $linha = if ($rows.Count -gt 0) { $rows[0] } else { $null }
+        $missing = @()
+        foreach ($campo in $colunas.Keys) {
+            if ([double](Get-NrqlValue -Row $linha -Name $colunas[$campo]) -le 0) { $missing += $campo }
+        }
+
+        $checks['Campos de log no nivel superior'] = [pscustomobject]@{
+            Ok     = $missing.Count -eq 0
+            Detail = if ($missing.Count -eq 0) { 'todos os campos no nivel superior' }
+                     else { "faltam no nivel superior (campo aninhado em body indica filelog sem parsing JSON): $($missing -join ', ')" }
+        }
+    }
+    catch {
+        $checks['Campos de log no nivel superior'] = [pscustomobject]@{ Ok = $false; Detail = $_.Exception.Message }
+    }
+
+    try {
+        $rows = Invoke-Nrql -Query @"
+FROM Span SELECT count(*)
+WHERE correlationId = '$CorrelationId'
+FACET service.name
+SINCE 10 minutes ago
+"@
+        $found = @(@($rows | ForEach-Object { Get-NrqlValue -Row $_ -Name 'facet' } | Where-Object { $null -ne $_ }) | Sort-Object -Unique)
+        $checks['Span da API de origem com o correlationId'] = [pscustomobject]@{
+            Ok     = $found.Count -gt 0
+            Detail = "servicos: $($found -join ', ')"
+        }
+    }
+    catch {
+        $checks['Span da API de origem com o correlationId'] = [pscustomobject]@{ Ok = $false; Detail = $_.Exception.Message }
+    }
+
+    try {
+        $rows = Invoke-Nrql -Query @"
+FROM Metric SELECT uniques(service.name)
+WHERE metricName LIKE 'http.server.%'
+SINCE 10 minutes ago
+"@
+        $found = @()
+        foreach ($row in $rows) {
+            foreach ($prop in $row.PSObject.Properties) {
+                if ($prop.Value -is [System.Array]) { $found += @($prop.Value) }
+            }
+        }
+        $found = @($found | Sort-Object -Unique)
+        $missing = @($Services | Where-Object { $found -notcontains $_ })
+        $checks['Metricas HTTP dos tres servicos'] = [pscustomobject]@{
+            Ok     = $missing.Count -eq 0
+            Detail = if ($missing.Count -eq 0) { '3 servicos' } else { "faltam: $($missing -join ', ')" }
+        }
+    }
+    catch {
+        $checks['Metricas HTTP dos tres servicos'] = [pscustomobject]@{ Ok = $false; Detail = $_.Exception.Message }
+    }
+
+    return $checks
+}
+
+function Wait-ForApiSignals {
+    param(
+        [Parameter(Mandatory = $true)][string]$CorrelationId,
+        [Parameter(Mandatory = $true)][string[]]$Services,
+        [switch]$Required
+    )
+
+    $statusWhenMissing = if ($Required) { 'falha' } else { 'pendente' }
+    $pendingPrefix = if ($Required) { '' } else { 'Aguardando redeploy das APIs instrumentadas. Ultima leitura: ' }
+
+    if (-not $Required) {
+        $checks = Get-ApiSignalChecks -CorrelationId $CorrelationId -Services $Services
+        foreach ($name in $checks.Keys) {
+            $check = $checks[$name]
+            $status = if ($check.Ok) { 'ok' } else { $statusWhenMissing }
+            $detail = if ($check.Ok) { $check.Detail } else { "$pendingPrefix$($check.Detail)" }
+            Add-Check -Name $name -Status $status -Detail $detail
+        }
+        return $true
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $lastChecks = $null
+    while ((Get-Date) -lt $deadline) {
+        $lastChecks = Get-ApiSignalChecks -CorrelationId $CorrelationId -Services $Services
+        $missing = @($lastChecks.Keys | Where-Object { -not $lastChecks[$_].Ok })
+        if ($missing.Count -eq 0) {
+            foreach ($name in $lastChecks.Keys) {
+                Add-Check -Name $name -Status 'ok' -Detail $lastChecks[$name].Detail
+            }
+            return $true
+        }
+        Start-Sleep -Seconds $IntervalSeconds
+    }
+
+    if ($null -eq $lastChecks) {
+        $lastChecks = Get-ApiSignalChecks -CorrelationId $CorrelationId -Services $Services
+    }
+    foreach ($name in $lastChecks.Keys) {
+        $check = $lastChecks[$name]
+        $status = if ($check.Ok) { 'ok' } else { $statusWhenMissing }
+        Add-Check -Name $name -Status $status -Detail $check.Detail
+    }
+    return (@($lastChecks.Keys | Where-Object { -not $lastChecks[$_].Ok }).Count -eq 0)
+}
+
 # ---------------------------------------------------------------------------
 # Requisicoes de origem com correlationId conhecido.
 #
@@ -322,87 +470,10 @@ if (-not $eventFound) {
 # ---------------------------------------------------------------------------
 Write-Step "Sinais das APIs (obrigatorios: $($RequireApiSignals.IsPresent))"
 
-Wait-ForSignal -Name 'Logs dos tres servicos com o correlationId' -Required:$RequireApiSignals -Query @"
-FROM Log SELECT count(*)
-WHERE correlationId = '$CorrelationId'
-FACET service.name
-SINCE 10 minutes ago
-"@ -Predicate {
-    param($rows)
-    $found = @(@($rows | ForEach-Object { Get-NrqlValue -Row $_ -Name 'facet' } | Where-Object { $null -ne $_ }) | Sort-Object -Unique)
-    $missing = @($services | Where-Object { $found -notcontains $_ })
-    [pscustomobject]@{
-        Ok     = $missing.Count -eq 0
-        Detail = if ($missing.Count -eq 0) { "3 servicos: $($found -join ', ')" } else { "faltam: $($missing -join ', ')" }
-    }
-} | Out-Null
-
-# Nao basta o log existir. Campo aninhado em body significa que o filelog
-# nao interpretou o JSON, e a correlacao com trace nao funciona.
-#
-# count(campo) conta ocorrencias nao nulas: campo que ficou aninhado em body
-# aparece como zero. A deteccao fica deterministica e nao depende do formato de
-# retorno de keyset(), que ja produziu leitura errada nesta validacao.
-Wait-ForSignal -Name 'Campos de log no nivel superior' -Required:$RequireApiSignals -Query @"
-FROM Log SELECT count(service.name) AS 'servico', count(service.version) AS 'versao',
-count(deployment.environment) AS 'ambiente', count(correlationId) AS 'correlacao',
-count(trace.id) AS 'trace', count(span.id) AS 'span'
-WHERE correlationId = '$CorrelationId'
-SINCE 10 minutes ago
-"@ -Predicate {
-    param($rows)
-    $colunas = [ordered]@{
-        'service.name'           = 'servico'
-        'service.version'        = 'versao'
-        'deployment.environment' = 'ambiente'
-        'correlationId'          = 'correlacao'
-        'trace.id'               = 'trace'
-        'span.id'                = 'span'
-    }
-
-    $linha = if ($rows.Count -gt 0) { $rows[0] } else { $null }
-    $missing = @()
-    foreach ($campo in $colunas.Keys) {
-        if ([double](Get-NrqlValue -Row $linha -Name $colunas[$campo]) -le 0) { $missing += $campo }
-    }
-
-    [pscustomobject]@{
-        Ok     = $missing.Count -eq 0
-        Detail = if ($missing.Count -eq 0) { 'todos os campos no nivel superior' }
-                 else { "faltam no nivel superior (campo aninhado em body indica filelog sem parsing JSON): $($missing -join ', ')" }
-    }
-} | Out-Null
-
-Wait-ForSignal -Name 'Span da API de origem com o correlationId' -Required:$RequireApiSignals -Query @"
-FROM Span SELECT count(*)
-WHERE correlationId = '$CorrelationId'
-FACET service.name
-SINCE 10 minutes ago
-"@ -Predicate {
-    param($rows)
-    $found = @(@($rows | ForEach-Object { Get-NrqlValue -Row $_ -Name 'facet' } | Where-Object { $null -ne $_ }) | Sort-Object -Unique)
-    [pscustomobject]@{ Ok = $found.Count -gt 0; Detail = "servicos: $($found -join ', ')" }
-} | Out-Null
-
-Wait-ForSignal -Name 'Metricas HTTP dos tres servicos' -Required:$RequireApiSignals -Query @"
-FROM Metric SELECT uniques(service.name)
-WHERE metricName LIKE 'http.server.%'
-SINCE 10 minutes ago
-"@ -Predicate {
-    param($rows)
-    $found = @()
-    foreach ($row in $rows) {
-        foreach ($prop in $row.PSObject.Properties) {
-            if ($prop.Value -is [System.Array]) { $found += @($prop.Value) }
-        }
-    }
-    $found = @($found | Sort-Object -Unique)
-    $missing = @($services | Where-Object { $found -notcontains $_ })
-    [pscustomobject]@{
-        Ok     = $missing.Count -eq 0
-        Detail = if ($missing.Count -eq 0) { "3 servicos" } else { "faltam: $($missing -join ', ')" }
-    }
-} | Out-Null
+# Estes quatro sinais dependem da mesma ingestao gerada pelas requisicoes acima.
+# Rodar um polling separado para cada um transforma uma falta de telemetria em
+# esperas sequenciais; um unico ciclo preserva a exigencia e reduz o pior caso.
+Wait-ForApiSignals -CorrelationId $CorrelationId -Services $services -Required:$RequireApiSignals | Out-Null
 
 # Semantica HTTP.
 if ($RequireApiSignals) {

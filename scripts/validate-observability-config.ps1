@@ -236,6 +236,13 @@ else {
     if ($valuesRaw -notmatch 'collectorObservability:') {
         Add-Failure 'newrelic-values.yaml nao habilita collectorObservability. Sem ele o alerta "Collector sem sinal" nao tem sinal para consultar.'
     }
+    if ($valuesRaw -match "(?ms)deployment:\s*\n.*?configMap:\s*\n.*?extraConfig:\s*\n\s+service:\s*\n\s+pipelines:") {
+        Add-Failure 'newrelic-values.yaml aninha pipelines em deployment.configMap.extraConfig.service.pipelines. O chart espera extraConfig.pipelines na raiz e injeta em service.pipelines.'
+    }
+    if ($valuesRaw -notmatch "(?ms)deployment:\s*\n.*?configMap:\s*\n.*?extraConfig:\s*\n\s+pipelines:\s*\n\s+traces/oficina:" -or
+        $valuesRaw -notmatch "(?ms)deployment:\s*\n.*?configMap:\s*\n.*?extraConfig:\s*\n\s+pipelines:\s*\n.*?\s+metrics/oficina:") {
+        Add-Failure 'newrelic-values.yaml precisa declarar traces/oficina e metrics/oficina em deployment.configMap.extraConfig.pipelines para receber OTLP das APIs.'
+    }
 }
 
 # ---------------------------------------------------------------------------
