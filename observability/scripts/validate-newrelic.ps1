@@ -69,8 +69,13 @@ $notificationExpected = -not [string]::IsNullOrWhiteSpace($NotificationEmail)
 $services = @('oficina-cadastro', 'oficina-estoque', 'oficina-ordens-servico')
 $results = [System.Collections.Generic.List[object]]::new()
 
-function Test-ConditionHasEntity {
+function Test-ConditionHasMonitor {
     param([Parameter(Mandatory = $true)]$Condition)
+
+    $monitorIdProperty = $Condition.PSObject.Properties['monitor_id']
+    if ($null -ne $monitorIdProperty -and -not [string]::IsNullOrWhiteSpace([string]$monitorIdProperty.Value)) {
+        return $true
+    }
 
     $entitiesProperty = $Condition.PSObject.Properties['entities']
     return $null -ne $entitiesProperty -and @($entitiesProperty.Value).Count -gt 0
@@ -598,15 +603,18 @@ query($accountId: Int!, $name: String!) {
                 if ($found.Count -eq 0) {
                     Add-Check -Name "Condicao '$expected' na policy" -Status 'falha' -Detail 'Nao encontrada.'
                 }
-                elseif (@($found | Where-Object { -not (Test-ConditionHasEntity -Condition $_) }).Count -gt 0) {
+                elseif (@($found | Where-Object { -not (Test-ConditionHasMonitor -Condition $_) }).Count -gt 0) {
                     Add-Check -Name "Condicao '$expected' na policy" -Status 'falha' -Detail 'Existe condicao sem monitor associado: a indisponibilidade nao viraria e-mail.'
                 }
                 else {
                     if ($found.Count -gt 1) {
                         Add-NerdGraphWarning -Context $context -Message "Condicao de Synthetic '$expected' duplicada na policy $policyId. O DEPLOY atualiza todas, mas a duplicidade deve ser limpa manualmente quando possivel."
                     }
-                    $references = (@($found | ForEach-Object { @($_.entities).Count }) -join ', ')
-                    Add-Check -Name "Condicao '$expected' na policy" -Status 'ok' -Detail "$($found.Count) ocorrencia(s), monitores por condicao: $references"
+                    $references = (@($found | ForEach-Object {
+                                $monitorId = Get-ObjectPropertyValue -Object $_ -Names @('monitor_id')
+                                if (-not [string]::IsNullOrWhiteSpace([string]$monitorId)) { $monitorId } else { @($_.entities).Count }
+                            }) -join ', ')
+                    Add-Check -Name "Condicao '$expected' na policy" -Status 'ok' -Detail "$($found.Count) ocorrencia(s), monitor_id/entidades: $references"
                 }
             }
         }

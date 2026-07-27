@@ -219,12 +219,13 @@ function Invoke-NewRelicRest {
     try {
         return Invoke-RestMethod @arguments
     }
-    catch {
-        $status = Get-HttpStatusCode -ErrorRecord $_
-        $descricao = if ($null -eq $status) { $_.Exception.Message } else { "HTTP ${status}: $($_.Exception.Message)" }
-        throw "New Relic REST falhou ($Method $Path): $descricao"
+        catch {
+            $status = Get-HttpStatusCode -ErrorRecord $_
+            $detalhe = if ([string]::IsNullOrWhiteSpace($_.ErrorDetails.Message)) { $_.Exception.Message } else { $_.ErrorDetails.Message }
+            $descricao = if ($null -eq $status) { $detalhe } else { "HTTP ${status}: $detalhe" }
+            throw "New Relic REST falhou ($Method $Path): $descricao"
+        }
     }
-}
 
 function Assert-NoMutationErrors {
     param(
@@ -406,7 +407,7 @@ function Set-SyntheticCondition {
     $conditionInput = @{
         name                         = $Condition.name
         enabled                      = $true
-        entities                     = @($MonitorGuid)
+        monitor_id                   = $MonitorGuid
         terms                        = @(@{ priority = 'critical'; threshold = [int]$Condition.criticalThreshold })
         violation_time_limit_seconds = [int]$Condition.violationTimeLimitSeconds
     }
