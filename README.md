@@ -14,10 +14,16 @@
   <img alt="GitHub Actions" src="https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white">
 </p>
 
+<p align="center">
+  <a href="https://jaquelineramosit.github.io/oficina-docs/"><img alt="Documentação oficial" src="https://img.shields.io/badge/Documenta%C3%A7%C3%A3o-oficial-0A66C2?logo=materialformkdocs&logoColor=white"></a>
+  <a href="https://youtu.be/SYXeLpUZaiA"><img alt="Vídeo de demonstração" src="https://img.shields.io/badge/V%C3%ADdeo-demonstra%C3%A7%C3%A3o-FF0000?logo=youtube&logoColor=white"></a>
+</p>
+
 ---
 
 ## Sumário
 
+- [Documentação e demonstração](#documentação-e-demonstração)
 - [Responsabilidade](#responsabilidade)
 - [Solução integrada](#solução-integrada)
 - [Ordem de deploy](#ordem-de-deploy)
@@ -31,6 +37,16 @@
 - [Observabilidade](#observabilidade)
 - [Próxima etapa](#próxima-etapa)
 
+---
+
+## Documentação e demonstração
+
+A solução **Oficina** tem documentação oficial e um vídeo de demonstração que percorrem a **configuração, o provisionamento e a validação** de ponta a ponta, na sequência das 11 etapas.
+
+| Recurso | Conteúdo |
+|---|---|
+| **[Documentação oficial](https://jaquelineramosit.github.io/oficina-docs/)** | Guia completo da solução: arquitetura, configuração dos repositórios, provisionamento na AWS e validação do ambiente publicado |
+| **[Vídeo de demonstração](https://youtu.be/SYXeLpUZaiA)** | Execução guiada da configuração, do provisionamento e da validação da solução |
 ---
 
 ## Responsabilidade
